@@ -1,0 +1,47 @@
+# Compiled binaries
+/metis-agent
+/metis-agent.exe
+/bin/
+/dist/
+/build/
+
+# Build/test artifacts
+*.test
+*.out
+coverage.*
+*.prof
+
+# Agent/tool metadata and generated analysis
+.siso/
+.metis-agent/
+
+# Secrets and local config — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials
+credentials.json
+secrets.*
+*.token
+metis-agent.json
+config.local.json
+.mcp.json
+mcp.json
+
+# Sessions and logs
+*.log
+sessions/
+*.session.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
