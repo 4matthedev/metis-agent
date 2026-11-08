@@ -563,28 +563,16 @@ setup_lmstudio() {
 }
 
 choose_backend() {
-  local installed=() names=() lms_path=""
-  have ollama && { installed+=(ollama); names+=("Ollama (installed)"); }
-  if lms_path="$(find_lms)"; then
-    installed+=(lmstudio); names+=("LM Studio (installed: ${lms_path})")
-  fi
-  have llama-server && { installed+=(llamacpp); names+=("llama.cpp (installed)"); }
+  local ollama_note="not installed" llama_note="not installed" lms_note="not installed"
+  have ollama && ollama_note="installed"
+  have llama-server && llama_note="installed"
+  find_lms >/dev/null 2>&1 && lms_note="installed"
 
-  if [ "${#installed[@]}" -gt 0 ]; then
-    local choice idx
-    choice="$(ask_choice "Which backend should Metis use?" 1 "${names[@]}")"
-    idx=$((choice-1))
-    [ "$idx" -ge 0 ] && [ "$idx" -lt "${#installed[@]}" ] || idx=0
-    BACKEND="${installed[$idx]}"
-    return 0
-  fi
-
-  warn "no local backend detected"
   local choice
-  choice="$(ask_choice "Nothing is installed yet. What should I install?" 1 \
-    "Ollama + ${DEFAULT_MODEL} (recommended)" \
-    "llama.cpp + ${DEFAULT_MODEL}" \
-    "LM Studio (manual install)" \
+  choice="$(ask_choice "Which backend should Metis use?" 1 \
+    "Ollama (${ollama_note})" \
+    "llama.cpp (${llama_note})" \
+    "LM Studio (${lms_note})" \
     "Nothing, just install Metis")"
   case "$choice" in
     2) BACKEND=llamacpp ;;
