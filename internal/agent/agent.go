@@ -139,7 +139,11 @@ Tools:
 - git_show: show a commit, tag, or object
 - git_blame: line-by-line authorship for a file
 - http_fetch: make HTTP(S) requests to read docs, APIs, or submit data
+- web_search: search the public web for current information
 - download_file: download a URL to a file
+- repo_map: compact outline of functions, types, and classes in the repository
+- diagnostics: run the project's build, type-check, and lint commands
+- subagent: delegate an independent read-only investigation to a fresh agent
 - system_info: OS, architecture, CPU count, user, temp path, and time
 - env_get: read environment variables (secrets redacted by default)
 - which: locate executables on PATH
@@ -156,7 +160,7 @@ Skills:
 - run executes a skill's declared run command. It is approval-gated exactly like shell — the user confirms each run. Do not bypass approval by shelling out to the command directly if a skill's run action is available.
 
 Workflow:
-1. Explore before editing. Start with project_info on unfamiliar repositories, then use list_dir, glob, search, and file_read.
+1. Explore before editing. Start with project_info on unfamiliar repositories, then use repo_map, list_dir, glob, search, and file_read.
 2. For multi-step work, write a todo list with todo_write and update it as you go.
 3. Make the smallest correct change with file_edit or multi_edit; use file_write for new files. Use replace_in_files for mechanical refactors, previewing with dry_run when the change is broad.
 4. Use make_dir, file_move, file_copy, file_delete, and diff_files for filesystem work instead of shell commands when possible.
@@ -209,6 +213,14 @@ type Config struct {
 	// Mode appends a mode-specific section to the system prompt. Defaults to
 	// ModeGeneral when unset.
 	Mode Mode
+	// Verify, when set, runs after a turn that changed files. A non-nil error
+	// is fed back to the model as a new instruction so it can fix the failure.
+	Verify func(ctx context.Context) (output string, err error)
+	// MaxVerifyAttempts bounds automatic verification retries. Defaults to 2.
+	MaxVerifyAttempts int
+	// BeginTurn and EndTurn bracket each Run. They are used for checkpoints.
+	BeginTurn func()
+	EndTurn   func()
 }
 
 // Agent holds conversation state across runs.
@@ -225,6 +237,9 @@ func New(cfg Config) *Agent {
 	}
 	if cfg.Window < 1 {
 		cfg.Window = 64
+	}
+	if cfg.MaxVerifyAttempts < 1 {
+		cfg.MaxVerifyAttempts = 2
 	}
 	mode := cfg.Mode
 	if mode < ModeGeneral || mode > ModeSimplifier {
@@ -263,6 +278,111 @@ func (a *Agent) HistoryLen() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.hist.Len()
+}
+
+// shouldVerify reports whether automatic verification applies to this turn.
+func (a *Agent) shouldVerify() bool {
+	return a.cfg.Verify != nil && a.cfg.Registry != nil && a.cfg.Registry.Mutations() > 0
+}
+
+func verifyResult(out string, err error) string {
+	if err == nil {
+		if strings.TrimSpace(out) == "" {
+			return "ok: verification passed"
+		}
+		return "ok: verification passed\n" + out
+	}
+	if strings.TrimSpace(out) == "" {
+		return "verification failed: " + err.Error()
+	}
+	return "verification failed: " + err.Error() + "\n" + out
+}
+
+func verificationFeedback(out string, err error) string {
+	const max = 8 * 1024
+	if len(out) > max {
+		out = out[:max] + "\n... (truncated)"
+	}
+	msg := "Automatic verification failed"
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	msg += ".\n\n" + out + "\n\nFix the failure, then finish with a short summary of the fix."
+	return msg
+}
+
+// ContextInfo reports the number of stored messages, an approximate token
+// count for those messages, and the configured window.
+func (a *Agent) ContextInfo() (messages, approxTokens, window int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	all := a.hist.All()
+	tokens := 0
+	for _, m := range all {
+		tokens += len(m.Content)/4 + 4
+		for _, tc := range m.ToolCalls {
+			tokens += len(tc.Function.Arguments)/4 + 4
+		}
+	}
+	return len(all), tokens, a.cfg.Window
+}
+
+// Compact summarizes the conversation and replaces the history with the
+// summary. It returns the generated summary text.
+func (a *Agent) Compact(ctx context.Context) (string, error) {
+	if a.cfg.LLM == nil {
+		return "", errors.New("no model is configured")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	all := a.hist.All()
+	if len(all) < 2 {
+		return "", errors.New("nothing to compact yet")
+	}
+	var b strings.Builder
+	for _, m := range all {
+		switch m.Role {
+		case "user":
+			b.WriteString("User: ")
+		case "assistant":
+			b.WriteString("Assistant: ")
+		case "tool":
+			b.WriteString("Tool result: ")
+		default:
+			continue
+		}
+		content := strings.TrimSpace(m.Content)
+		if content == "" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				content += tc.Function.Name + "(" + tc.Function.Arguments + ") "
+			}
+		}
+		b.WriteString(content)
+		b.WriteString("\n\n")
+		if b.Len() > 60*1024 {
+			b.WriteString("... (transcript truncated)")
+			break
+		}
+	}
+	req := []llm.Message{
+		{Role: "system", Content: "Summarize this coding session for another agent that must continue the work. " +
+			"Preserve the user's goals, constraints, decisions, files changed, commands run, failures, and the exact next step. " +
+			"Be concise but complete; do not add commentary."},
+		{Role: "user", Content: b.String()},
+	}
+	comp, err := a.cfg.LLM.Complete(ctx, req, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	summary := strings.TrimSpace(comp.Content)
+	if summary == "" {
+		return "", errors.New("the model returned an empty summary")
+	}
+	a.hist.Load([]llm.Message{
+		{Role: "user", Content: "Summary of the earlier conversation (continue from here):\n\n" + summary},
+		{Role: "assistant", Content: "Understood. I have the context and will continue."},
+	})
+	return summary, nil
 }
 
 // SetEventSink replaces the progress callback. Set it before calling Run;
@@ -322,6 +442,9 @@ func (a *Agent) SetAutoApprove(v bool) { a.cfg.Registry.SetAutoApprove(v) }
 // AutoApprove reports whether dangerous calls run without confirmation.
 func (a *Agent) AutoApprove() bool { return a.cfg.Registry.AutoApprove() }
 
+// SetApproveEdits controls whether in-project file edits ask for approval.
+func (a *Agent) SetApproveEdits(v bool) { a.cfg.Registry.SetApproveEdits(v) }
+
 // Run executes one user task, keeping the conversation across calls. The
 // final answer is returned; streamed text and progress are delivered through
 // cfg.OnEvent.
@@ -335,6 +458,16 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 	}
 	base := a.hist.Len()
 	a.hist.Append(llm.Message{Role: "user", Content: user})
+	if a.cfg.BeginTurn != nil {
+		a.cfg.BeginTurn()
+	}
+	if a.cfg.EndTurn != nil {
+		defer a.cfg.EndTurn()
+	}
+	if a.cfg.Registry != nil {
+		a.cfg.Registry.ResetMutations()
+	}
+	verifyAttempts := 0
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -394,6 +527,32 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 		}
 
 		a.hist.Append(llm.Message{Role: "assistant", Content: comp.Content})
+
+		// Automatic verification: only when the turn changed files and a
+		// command was configured. Failures are fed back as a new instruction
+		// so the model can repair its own work instead of shipping it.
+		if a.shouldVerify() {
+			a.emit(Event{Kind: EventToolCall, Step: step + 1, Tool: "verify"})
+			t0 := time.Now()
+			out, verr := a.cfg.Verify(ctx)
+			a.emit(Event{
+				Kind:     EventToolResult,
+				Step:     step + 1,
+				Tool:     "verify",
+				Result:   verifyResult(out, verr),
+				Duration: time.Since(t0),
+			})
+			if verr != nil {
+				verifyAttempts++
+				if verifyAttempts < a.cfg.MaxVerifyAttempts {
+					a.hist.Append(llm.Message{Role: "user", Content: verificationFeedback(out, verr)})
+					continue
+				}
+				comp.Content += "\n\nAutomatic verification still failed after " +
+					fmt.Sprintf("%d attempt(s):\n", verifyAttempts) + verificationFeedback(out, verr)
+			}
+		}
+
 		a.emit(Event{Kind: EventDone, Step: step + 1, Text: comp.Content})
 		return comp.Content, nil
 	}

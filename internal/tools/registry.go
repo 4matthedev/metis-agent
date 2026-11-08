@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"metis-agent/internal/llm"
+	"metis-agent/internal/redact"
 )
 
 // maxToolResult caps a single tool result before it is appended to the model
@@ -35,8 +36,20 @@ type Registry struct {
 	// direct calls to them. It is a hard gate; approval cannot override it.
 	policyMu sync.RWMutex
 	policy   Policy
+	// mutationMu guards the mutation hook list, the per-run mutation counter,
+	// and the redaction switch.
+	mutationMu    sync.Mutex
+	mutationHooks []MutationHook
+	mutations     int
+	redact        bool
+	approveEdits  bool
 	approvalState
 }
+
+// MutationHook is called before a tool that can change the filesystem runs.
+// paths contains the resolved paths the tool is expected to touch, which lets
+// checkpointing snapshot them before the change.
+type MutationHook func(name string, args map[string]any, paths []string)
 
 // Options configures which tools are registered.
 type Options struct {
@@ -98,9 +111,12 @@ func NewRegistryWithOptions(opts Options) *Registry {
 	r.Add(NewGitShowTool(opts.WorkDir))
 	r.Add(NewGitBlameTool(opts.WorkDir))
 
-	// Web and system diagnostics.
+	// Web, repository orientation, and system diagnostics.
 	r.Add(NewHTTPFetchTool())
+	r.Add(NewWebSearchTool())
 	r.Add(NewDownloadFileTool(opts.WorkDir))
+	r.Add(NewRepoMapTool(opts.WorkDir))
+	r.Add(NewDiagnosticsTool(opts.WorkDir))
 	r.Add(NewSystemInfoTool(opts.WorkDir))
 	r.Add(NewEnvGetTool())
 	r.Add(NewWhichTool())
@@ -133,6 +149,67 @@ func (r *Registry) SetPolicy(p Policy) {
 	r.policyMu.Lock()
 	r.policy = p
 	r.policyMu.Unlock()
+}
+
+// SetRedactSecrets enables or disables credential redaction on tool output.
+func (r *Registry) SetRedactSecrets(v bool) {
+	r.mutationMu.Lock()
+	r.redact = v
+	r.mutationMu.Unlock()
+}
+
+// SetApproveEdits controls whether file edits inside the project ask for
+// confirmation with a diff preview.
+func (r *Registry) SetApproveEdits(v bool) {
+	r.mutationMu.Lock()
+	r.approveEdits = v
+	r.mutationMu.Unlock()
+}
+
+func (r *Registry) approveEditsEnabled() bool {
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
+	return r.approveEdits
+}
+
+// AddMutationHook registers a callback that runs before a mutating tool. The
+// hook receives the resolved paths that are about to change.
+func (r *Registry) AddMutationHook(fn MutationHook) {
+	if fn == nil {
+		return
+	}
+	r.mutationMu.Lock()
+	r.mutationHooks = append(r.mutationHooks, fn)
+	r.mutationMu.Unlock()
+}
+
+// Mutations reports how many mutating tool calls have succeeded since the
+// counter was last reset.
+func (r *Registry) Mutations() int {
+	r.mutationMu.Lock()
+	defer r.mutationMu.Unlock()
+	return r.mutations
+}
+
+// ResetMutations zeroes the mutation counter.
+func (r *Registry) ResetMutations() {
+	r.mutationMu.Lock()
+	r.mutations = 0
+	r.mutationMu.Unlock()
+}
+
+// notifyMutation invokes the hooks and returns whether the call is mutating.
+func (r *Registry) notifyMutation(name string, args map[string]any, paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	r.mutationMu.Lock()
+	hooks := append([]MutationHook(nil), r.mutationHooks...)
+	r.mutationMu.Unlock()
+	for _, fn := range hooks {
+		fn(name, args, paths)
+	}
+	return true
 }
 
 // allow reports whether the policy permits a tool call. It is safe to call
@@ -295,9 +372,53 @@ func (r *Registry) Execute(ctx context.Context, name string, input []byte) strin
 			return fmt.Sprintf("error: user denied permission to run %s. Do not retry this call; ask the user how to proceed.", name)
 		}
 	}
+	paths := r.mutationPaths(name, args)
+	mutating := r.notifyMutation(name, args, paths)
 	out, err := t.Handler(ctx, args)
 	if err != nil {
 		return fmt.Sprintf("error: %v", err)
 	}
-	return truncateText(out, maxToolResult)
+	if mutating {
+		r.mutationMu.Lock()
+		r.mutations++
+		r.mutationMu.Unlock()
+	}
+	out = truncateText(out, maxToolResult)
+	r.mutationMu.Lock()
+	shouldRedact := r.redact
+	r.mutationMu.Unlock()
+	if shouldRedact {
+		out = redact.String(out)
+	}
+	return out
+}
+
+// mutationPaths resolves the paths a tool is expected to change. A nil result
+// marks the call as read-only.
+func (r *Registry) mutationPaths(name string, args map[string]any) []string {
+	add := func(dst []string, key string) []string {
+		raw := strings.TrimSpace(str(args[key]))
+		if raw == "" {
+			return dst
+		}
+		if p, err := resolvePath(r.workDir, raw); err == nil {
+			dst = append(dst, p)
+		}
+		return dst
+	}
+	var paths []string
+	switch name {
+	case "file_write", "file_edit", "multi_edit", "make_dir", "file_delete", "download_file":
+		paths = add(paths, "path")
+	case "file_copy":
+		paths = add(paths, "to")
+	case "file_move":
+		paths = add(paths, "from")
+		paths = add(paths, "to")
+	case "replace_in_files":
+		if !boolArg(args, "dry_run") {
+			paths = add(paths, "path")
+		}
+	}
+	return paths
 }

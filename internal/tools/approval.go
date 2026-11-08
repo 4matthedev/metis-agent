@@ -31,6 +31,9 @@ type ApprovalRequest struct {
 	Tool    string
 	Summary string
 	Reason  string
+	// Preview is an optional multi-line diff or excerpt shown before the
+	// decision so the user can see exactly what will change.
+	Preview string
 }
 
 // approvalState is embedded in Registry. The mutex protects the fields below.
@@ -127,6 +130,11 @@ func (r *Registry) needApproval(name string, args map[string]any) (ApprovalReque
 		req.Reason = "shell commands can modify files, run programs, and access the network."
 		return req, true
 
+	case "diagnostics":
+		req.Summary = "run project diagnostics in " + defaultString(path("path"), ".")
+		req.Reason = "diagnostics run build, test, and lint programs."
+		return req, true
+
 	case "file_delete":
 		req.Summary = path("path")
 		if boolArg(args, "recursive") {
@@ -167,7 +175,20 @@ func (r *Registry) needApproval(name string, args map[string]any) (ApprovalReque
 			return req, true
 		}
 
-	case "file_write", "file_edit", "multi_edit", "make_dir":
+	case "file_write", "file_edit", "multi_edit":
+		req.Preview = r.previewMutation(name, args)
+		if outsideAny(path("path")) {
+			req.Summary = path("path")
+			req.Reason = outside
+			return req, true
+		}
+		if r.approveEditsEnabled() && req.Preview != "" {
+			req.Summary = path("path")
+			req.Reason = "review the diff before it is written."
+			return req, true
+		}
+
+	case "make_dir":
 		if outsideAny(path("path")) {
 			req.Summary = path("path")
 			req.Reason = outside

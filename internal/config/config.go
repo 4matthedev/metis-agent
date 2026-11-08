@@ -15,54 +15,66 @@ import (
 
 // Values is the fully resolved runtime configuration.
 type Values struct {
-	Provider        string
-	BaseURL         string
-	Model           string
-	APIKey          string
-	Temperature     float64
-	MaxSteps        int
-	Window          int
-	Shell           bool
-	ShellTimeoutSec int
-	Session         bool
-	Highlight       string // auto, dark, light
-	AutoApprove     bool
-	McpServers      []mcp.ServerConfig
+	Provider         string
+	BaseURL          string
+	Model            string
+	APIKey           string
+	Temperature      float64
+	MaxSteps         int
+	Window           int
+	Shell            bool
+	ShellTimeoutSec  int
+	Session          bool
+	Highlight        string // auto, dark, light
+	AutoApprove      bool
+	RedactSecrets    bool
+	Verify           string
+	VerifyTimeoutSec int
+	Instructions     []string
+	FallbackModels   []string
+	McpServers       []mcp.ServerConfig
 }
 
 // Defaults are safe, provider-neutral defaults. The provider is auto-detected
 // and the model is discovered unless explicitly configured.
 func Defaults() Values {
 	return Values{
-		Provider:        "auto",
-		Temperature:     0.3,
-		MaxSteps:        40,
-		Window:          64,
-		Shell:           true,
-		ShellTimeoutSec: 120,
-		Session:         true,
-		Highlight:       "auto",
-		AutoApprove:     false,
-		McpServers:      nil,
+		Provider:         "auto",
+		Temperature:      0.3,
+		MaxSteps:         40,
+		Window:           64,
+		Shell:            true,
+		ShellTimeoutSec:  120,
+		Session:          true,
+		Highlight:        "auto",
+		AutoApprove:      false,
+		RedactSecrets:    true,
+		VerifyTimeoutSec: 120,
+		McpServers:       nil,
 	}
 }
 
 // File is the on-disk JSON shape. Pointers distinguish "unset" from zero
 // values so project config can override global config cleanly.
 type File struct {
-	Provider        *string            `json:"provider,omitempty"`
-	BaseURL         *string            `json:"base_url,omitempty"`
-	Model           *string            `json:"model,omitempty"`
-	APIKey          *string            `json:"api_key,omitempty"`
-	Temperature     *float64           `json:"temperature,omitempty"`
-	MaxSteps        *int               `json:"max_steps,omitempty"`
-	Window          *int               `json:"window,omitempty"`
-	Shell           *bool              `json:"shell,omitempty"`
-	ShellTimeoutSec *int               `json:"shell_timeout_sec,omitempty"`
-	Session         *bool              `json:"session,omitempty"`
-	Highlight       *string            `json:"highlight,omitempty"`
-	AutoApprove     *bool              `json:"auto_approve,omitempty"`
-	McpServers      []mcp.ServerConfig `json:"mcp_servers,omitempty"`
+	Provider         *string            `json:"provider,omitempty"`
+	BaseURL          *string            `json:"base_url,omitempty"`
+	Model            *string            `json:"model,omitempty"`
+	APIKey           *string            `json:"api_key,omitempty"`
+	Temperature      *float64           `json:"temperature,omitempty"`
+	MaxSteps         *int               `json:"max_steps,omitempty"`
+	Window           *int               `json:"window,omitempty"`
+	Shell            *bool              `json:"shell,omitempty"`
+	ShellTimeoutSec  *int               `json:"shell_timeout_sec,omitempty"`
+	Session          *bool              `json:"session,omitempty"`
+	Highlight        *string            `json:"highlight,omitempty"`
+	AutoApprove      *bool              `json:"auto_approve,omitempty"`
+	RedactSecrets    *bool              `json:"redact_secrets,omitempty"`
+	Verify           *string            `json:"verify,omitempty"`
+	VerifyTimeoutSec *int               `json:"verify_timeout_sec,omitempty"`
+	Instructions     []string           `json:"instructions,omitempty"`
+	FallbackModels   []string           `json:"fallback_models,omitempty"`
+	McpServers       []mcp.ServerConfig `json:"mcp_servers,omitempty"`
 }
 
 // Apply overlays non-nil file values onto v.
@@ -103,9 +115,35 @@ func (f File) Apply(v *Values) {
 	if f.AutoApprove != nil {
 		v.AutoApprove = *f.AutoApprove
 	}
+	if f.RedactSecrets != nil {
+		v.RedactSecrets = *f.RedactSecrets
+	}
+	if f.Verify != nil {
+		v.Verify = strings.TrimSpace(*f.Verify)
+	}
+	if f.VerifyTimeoutSec != nil {
+		v.VerifyTimeoutSec = *f.VerifyTimeoutSec
+	}
+	if len(f.Instructions) > 0 {
+		v.Instructions = cleanList(f.Instructions)
+	}
+	if len(f.FallbackModels) > 0 {
+		v.FallbackModels = cleanList(f.FallbackModels)
+	}
 	if len(f.McpServers) > 0 {
 		v.McpServers = f.McpServers
 	}
+}
+
+// cleanList trims entries and drops empty ones.
+func cleanList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // LoadFile reads and decodes a JSON config file.
@@ -245,6 +283,29 @@ func ApplyEnv(v *Values) error {
 		}
 		v.AutoApprove = b
 	}
+	if s := strings.TrimSpace(os.Getenv("METIS_REDACT_SECRETS")); s != "" {
+		b, err := strconv.ParseBool(s)
+		if err != nil {
+			return fmt.Errorf("METIS_REDACT_SECRETS: %w", err)
+		}
+		v.RedactSecrets = b
+	}
+	if s := strings.TrimSpace(os.Getenv("METIS_VERIFY")); s != "" {
+		v.Verify = s
+	}
+	if s := strings.TrimSpace(os.Getenv("METIS_VERIFY_TIMEOUT_SEC")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("METIS_VERIFY_TIMEOUT_SEC: %w", err)
+		}
+		v.VerifyTimeoutSec = n
+	}
+	if s := strings.TrimSpace(os.Getenv("METIS_INSTRUCTIONS")); s != "" {
+		v.Instructions = splitList(s)
+	}
+	if s := strings.TrimSpace(os.Getenv("METIS_FALLBACK_MODELS")); s != "" {
+		v.FallbackModels = splitList(s)
+	}
 	if s := strings.TrimSpace(os.Getenv("METIS_MCP_SERVERS")); s != "" {
 		var servers []mcp.ServerConfig
 		if err := json.Unmarshal([]byte(s), &servers); err != nil {
@@ -272,6 +333,9 @@ func (v Values) Validate() error {
 	if v.ShellTimeoutSec < 1 {
 		return fmt.Errorf("shell_timeout_sec must be at least 1")
 	}
+	if v.VerifyTimeoutSec < 1 {
+		return fmt.Errorf("verify_timeout_sec must be at least 1")
+	}
 	switch v.Highlight {
 	case "auto", "dark", "light", "off":
 	default:
@@ -286,18 +350,23 @@ func WriteDefault(path string, v Values) error {
 		return err
 	}
 	f := File{
-		Provider:        &v.Provider,
-		BaseURL:         &v.BaseURL,
-		Model:           &v.Model,
-		Temperature:     &v.Temperature,
-		MaxSteps:        &v.MaxSteps,
-		Window:          &v.Window,
-		Shell:           &v.Shell,
-		ShellTimeoutSec: &v.ShellTimeoutSec,
-		Session:         &v.Session,
-		Highlight:       &v.Highlight,
-		AutoApprove:     &v.AutoApprove,
-		McpServers:      v.McpServers,
+		Provider:         &v.Provider,
+		BaseURL:          &v.BaseURL,
+		Model:            &v.Model,
+		Temperature:      &v.Temperature,
+		MaxSteps:         &v.MaxSteps,
+		Window:           &v.Window,
+		Shell:            &v.Shell,
+		ShellTimeoutSec:  &v.ShellTimeoutSec,
+		Session:          &v.Session,
+		Highlight:        &v.Highlight,
+		AutoApprove:      &v.AutoApprove,
+		RedactSecrets:    &v.RedactSecrets,
+		Verify:           &v.Verify,
+		VerifyTimeoutSec: &v.VerifyTimeoutSec,
+		Instructions:     v.Instructions,
+		FallbackModels:   v.FallbackModels,
+		McpServers:       v.McpServers,
 	}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -305,6 +374,18 @@ func WriteDefault(path string, v Values) error {
 	}
 	b = append(b, '\n')
 	return os.WriteFile(path, b, 0o600)
+}
+
+// splitList splits a comma-separated environment value.
+func splitList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // mergeServers merges env-provided servers on top of file servers: a file and
