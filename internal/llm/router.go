@@ -9,12 +9,14 @@ import (
 )
 
 // Router is a Completer that can switch models at runtime and retry with a
-// fallback model when the active one is unavailable.
+// fallback model when the active one is unavailable. It also carries the
+// thinking level (reasoning effort) on every request.
 type Router struct {
 	provider  string
 	baseURL   string
 	apiKey    string
 	temp      float64
+	thinking  ThinkingLevel
 	fallbacks []string
 
 	mu       sync.RWMutex
@@ -24,12 +26,13 @@ type Router struct {
 }
 
 // NewRouter builds a router for one provider and an ordered fallback chain.
-func NewRouter(provider, baseURL, apiKey, model string, temp float64, fallbacks []string) (*Router, error) {
+func NewRouter(provider, baseURL, apiKey, model string, temp float64, thinking ThinkingLevel, fallbacks []string) (*Router, error) {
 	r := &Router{
 		provider:  provider,
 		baseURL:   baseURL,
 		apiKey:    apiKey,
 		temp:      temp,
+		thinking:  thinking,
 		fallbacks: dedupe(append([]string{model}, fallbacks...)),
 		model:     model,
 	}
@@ -42,13 +45,31 @@ func NewRouter(provider, baseURL, apiKey, model string, temp float64, fallbacks 
 }
 
 func (r *Router) clientFor(model string) (*Client, error) {
+	r.mu.RLock()
+	thinking := r.thinking
+	r.mu.RUnlock()
 	return NewClientWithOptions(ClientOptions{
 		Provider: r.provider,
 		BaseURL:  r.baseURL,
 		Model:    model,
 		APIKey:   r.apiKey,
 		Temp:     r.temp,
+		Thinking: thinking,
 	})
+}
+
+// SetThinking changes the reasoning effort for all subsequent requests.
+func (r *Router) SetThinking(l ThinkingLevel) {
+	r.mu.Lock()
+	r.thinking = l
+	r.mu.Unlock()
+}
+
+// Thinking returns the current reasoning effort.
+func (r *Router) Thinking() ThinkingLevel {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.thinking
 }
 
 // Complete tries the active model first, then each fallback in order. Context

@@ -55,14 +55,15 @@ type Completion struct {
 }
 
 type Client struct {
-	Provider   string
-	BaseURL    string
-	Model      string
-	Temp       float64
-	APIKey     string
-	ChatURL    string
-	ModelsURL  string
-	httpClient *http.Client
+	Provider    string
+	BaseURL     string
+	Model       string
+	Temp        float64
+	APIKey      string
+	Thinking    ThinkingLevel
+	ChatURL     string
+	ModelsURL   string
+	httpClient  *http.Client
 }
 
 // ClientOptions configures a Client for one provider.
@@ -72,6 +73,7 @@ type ClientOptions struct {
 	Model      string
 	APIKey     string
 	Temp       float64
+	Thinking   ThinkingLevel
 	HTTPClient *http.Client
 }
 
@@ -193,6 +195,7 @@ func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 		Model:      opts.Model,
 		Temp:       opts.Temp,
 		APIKey:     apiKey,
+		Thinking:   opts.Thinking,
 		ChatURL:    chatURL,
 		ModelsURL:  modelsURL,
 		httpClient: httpClient,
@@ -238,22 +241,25 @@ func AsClientError(err error) (*ClientError, bool) {
 }
 
 type completeRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Tools       []Tool    `json:"tools"`
-	Stream      bool      `json:"stream"`
-	Temperature float64   `json:"temperature"`
+	Model        string    `json:"model"`
+	Messages     []Message `json:"messages"`
+	Tools        []Tool    `json:"tools"`
+	Stream       bool      `json:"stream"`
+	Temperature  float64   `json:"temperature"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Complete performs one chat completion. Assistant text deltas are passed to
 // onToken (nil to suppress) as they arrive; the aggregated turn is returned.
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool, onToken func(string)) (*Completion, error) {
+	reasoningEffort := c.Thinking.ReasoningEffort()
 	body, err := json.Marshal(completeRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Tools:       tools,
-		Stream:      true,
-		Temperature: c.Temp,
+		Model:          c.Model,
+		Messages:       messages,
+		Tools:          tools,
+		Stream:         true,
+		Temperature:    c.Temp,
+		ReasoningEffort: reasoningEffort,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)

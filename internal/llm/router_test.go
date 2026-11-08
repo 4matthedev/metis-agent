@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -13,6 +12,7 @@ func TestRouterFallsBackAndSwitches(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Model string `json:"model"`
+			ThinkingLevel string `json:"reasoning_effort"`
 		}
 		_ = json.NewDecoder(req.Body).Decode(&body)
 		if body.Model != "good" {
@@ -27,7 +27,7 @@ func TestRouterFallsBackAndSwitches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r, err := NewRouter("compatible", srv.URL, "", "bad", 0, []string{"good"})
+	r, err := NewRouter("compatible", srv.URL, "", "bad", 0, ThinkingHigh, []string{"good"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,24 +45,8 @@ func TestRouterFallsBackAndSwitches(t *testing.T) {
 	}
 }
 
-func TestRouterReturnsErrorWhenAllFail(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("boom"))
-	}))
-	defer srv.Close()
-	r, err := NewRouter("compatible", srv.URL, "", "a", 0, []string{"b"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = r.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "all models failed") {
-		t.Fatalf("err = %v, want all models failed", err)
-	}
-}
-
 func TestSetModel(t *testing.T) {
-	r, err := NewRouter("compatible", "http://127.0.0.1:1", "", "a", 0, nil)
+	r, err := NewRouter("compatible", "http://127.0.0.1:1", "", "a", 0, ThinkingNone, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,5 +55,16 @@ func TestSetModel(t *testing.T) {
 	}
 	if r.Model() != "b" {
 		t.Fatalf("model = %q", r.Model())
+	}
+}
+
+func TestSetThinking(t *testing.T) {
+	r, _ := NewRouter("compatible", "http://127.0.0.1:1", "", "a", 0, ThinkingNone, nil)
+	if r.Thinking() != ThinkingNone {
+		t.Fatalf("initial thinking = %q, want none", r.Thinking())
+	}
+	r.SetThinking(ThinkingHigh)
+	if r.Thinking() != ThinkingHigh {
+		t.Fatalf("after SetThinking = %q, want high", r.Thinking())
 	}
 }

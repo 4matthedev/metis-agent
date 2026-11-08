@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"metis-agent/internal/agent"
+	"metis-agent/internal/llm"
 	"metis-agent/internal/mcp"
 	"metis-agent/internal/session"
 	"metis-agent/internal/skills"
@@ -34,6 +35,8 @@ type Options struct {
 	// Mode is the initial operating mode (0-based index into modes). -1
 	// means General. Tab cycles through modes live during the session.
 	Mode int
+	// Thinking is the initial thinking level (reasoning effort).
+	Thinking string
 	// Session fields are optional; when Store and Session are nil the TUI
 	// runs without persistence.
 	SessionID       string
@@ -54,6 +57,9 @@ type Options struct {
 	ListModels func(ctx context.Context) ([]string, error)
 	SetModel   func(string) error
 	ModelName  func() string
+	// SetThinking and ThinkingLevel power runtime thinking-level switching.
+	SetThinking func(llm.ThinkingLevel) error
+	ThinkingLevel func() llm.ThinkingLevel
 }
 
 // modes is the ordered list of operating modes the user can switch between

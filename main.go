@@ -16,11 +16,11 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"metis-agent/internal/acp"
 	"metis-agent/internal/agent"
 	"metis-agent/internal/checkpoint"
 	"metis-agent/internal/config"
 	"metis-agent/internal/doctor"
-	"metis-agent/internal/instructions"
 	"metis-agent/internal/llm"
 	"metis-agent/internal/mcp"
 	"metis-agent/internal/session"
@@ -64,6 +64,7 @@ Tools:
 - web_search: search the public web for current information
 - download_file: download a URL to a file
 - repo_map: compact outline of functions, types, and classes in the repository
+- semantic_search: search the repository by meaning when an embedding model is configured
 - diagnostics: run the project's build, type-check, and lint commands
 - subagent: delegate an independent read-only investigation to a fresh agent
 - system_info: OS, architecture, CPU count, user, temp path, and time
@@ -114,6 +115,7 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --model NAME        model name (auto-detected when a provider has one model)
   --port PORT         legacy shortcut: local server port
   --temp T            temperature (default: 0.3)
+  --thinking LEVEL    thinking level (none|low|medium|high|xhigh, default: none)
   --max-steps N       max agent steps (default: 40)
   --window N          conversation messages kept in context (default: 64)
   --system PROMPT     system prompt override
@@ -130,6 +132,7 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --verify-timeout N  auto-verify timeout in seconds (default: 120)
   --fallback-models L comma-separated fallback models
   --instructions L    comma-separated extra instruction files
+  --embedding-model M embedding model for semantic_search (for example nomic-embed-text)
   --highlight MODE    syntax highlighting: auto, dark, light, off
   --config PATH       load this config file instead of the standard ones
   --no-config         ignore config files (environment and flags still apply)
@@ -140,6 +143,7 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --no-session        disable session persistence
   --plain             disable the TUI and use the line REPL
   --json              stream NDJSON events on stdout (for editors)
+  --acp               run as an Agent Client Protocol server over stdio
   --once TASK         single-shot task
   --doctor            diagnose the installation and model backend
   --update            download and install the latest release
@@ -184,6 +188,7 @@ func main() {
 	plain := flag.Bool("plain", false, "disable the TUI and use the line REPL")
 	once := flag.String("once", "", "single-shot task")
 	jsonMode := flag.Bool("json", false, "stream NDJSON events on stdout (implies --plain)")
+	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol server over stdin/stdout")
 	undoFlag := flag.Bool("undo", false, "restore files changed by the previous turn and exit")
 	doctorFlag := flag.Bool("doctor", false, "diagnose the installation and model backend")
 	updateFlag := flag.Bool("update", false, "download and install the latest release")
@@ -195,7 +200,9 @@ func main() {
 	verifyTimeout := flag.Int("verify-timeout", 0, "auto-verify timeout in seconds")
 	fallbackModels := flag.String("fallback-models", "", "comma-separated fallback models")
 	instructionsFlag := flag.String("instructions", "", "comma-separated extra instruction files")
+	embeddingModel := flag.String("embedding-model", "", "embedding model for semantic_search (for example nomic-embed-text)")
 	approveEdits := flag.Bool("approve-edits", false, "review in-project file edits with a diff before writing")
+	thinking := flag.String("thinking", "", "thinking level (none|low|medium|high|xhigh)")
 	flag.Usage = func() { fmt.Fprint(os.Stderr, helpText) }
 	flag.Parse()
 
@@ -322,8 +329,14 @@ func main() {
 	if set["fallback-models"] {
 		v.FallbackModels = splitCSV(*fallbackModels)
 	}
+	if set["thinking"] {
+		v.Thinking = strings.TrimSpace(*thinking)
+	}
 	if set["instructions"] {
 		v.Instructions = splitCSV(*instructionsFlag)
+	}
+	if set["embedding-model"] {
+		v.EmbeddingModel = strings.TrimSpace(*embeddingModel)
 	}
 	if set["redact-secrets"] {
 		v.RedactSecrets = *redactSecrets
@@ -408,85 +421,42 @@ func main() {
 		fatal(err)
 	}
 
-	router, err := llm.NewRouter(resolved.Provider, resolved.BaseURL, resolved.APIKey,
-		resolved.Model, v.Temperature, v.FallbackModels)
+	if *acpMode {
+		ctx, cancel := interruptContext()
+		defer cancel()
+		factory := func(cwd string) (*agent.Agent, func(), error) {
+			built, err := buildAgent(cwd, resolved, v, *system, *approveEdits)
+			if err != nil {
+				return nil, nil, err
+			}
+			return built.Agent, built.Close, nil
+		}
+		err := acp.Serve(ctx, os.Stdin, os.Stdout, acp.Options{
+			Version: version,
+			WorkDir: *dir,
+			Factory: factory,
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fatal(err)
+		}
+		return
+	}
+
+	built, err := buildAgent(*dir, resolved, v, *system, *approveEdits)
 	if err != nil {
 		fatal(err)
 	}
+	defer built.Close()
 
-	registry := tools.NewRegistryWithOptions(tools.Options{
-		WorkDir:      *dir,
-		EnableShell:  v.Shell,
-		ShellTimeout: time.Duration(v.ShellTimeoutSec) * time.Second,
-		AutoApprove:  v.AutoApprove,
-	})
-	registry.SetRedactSecrets(v.RedactSecrets)
-	registry.SetApproveEdits(*approveEdits)
-	cp, cpErr := checkpoint.New(*dir)
-	if cpErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: undo checkpoints are disabled: %v\n", cpErr)
-		cp = nil
-	}
-	if cp != nil {
-		registry.AddMutationHook(func(_ string, _ map[string]any, paths []string) {
-			for _, p := range paths {
-				cp.Snapshot(p)
-			}
-		})
-	}
-	registerSubagentTool(registry, router, *dir)
-	// MCP servers: load the ones already configured, and keep a live manager so
-	// the user can add/remove/reconnect them from the /mcp command.
-	mcpPath := config.ProjectPath(*dir)
-	mgr := mcp.NewManager(registry, mcpPath)
-	loadCtx, loadCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer loadCancel()
-	mgr.Load(loadCtx)
-	// Close any MCP connections on exit.
-	defer func() {
-		if err := mgr.CloseAll(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: closing mcp server: %v\n", err)
-		}
-	}()
-	// Skills: discover SKILL.md files from project-local and global dirs, and
-	// install the skills tool (list/info/use/run, with run approval-gated).
-	skillsM := skills.NewManager(*dir)
-	skillsReg := tools.NewSkillsTool(skillsM, registry)
-	registry.SetSkillsTool(skillsReg)
-	toolNames := make([]string, 0, len(registry.List()))
-	for _, t := range registry.List() {
+	a := built.Agent
+	router := built.Router
+	mgr := built.MCP
+	skillsM := built.Skills
+	cp := built.Checkpoints
+	toolNames := make([]string, 0, len(a.Registry().List()))
+	for _, t := range a.Registry().List() {
 		toolNames = append(toolNames, t.Name)
 	}
-	docs := instructions.Load(*dir, v.Instructions)
-	cfg := agent.Config{
-		LLM:      router,
-		Registry: registry,
-		System:   baseSystemPrompt,
-		MaxSteps: v.MaxSteps,
-		Window:   v.Window,
-		Mode:     agent.ModeGeneral,
-	}
-	if *system != "" {
-		cfg.System = *system
-	}
-	if prompt := instructions.Prompt(docs); prompt != "" {
-		cfg.System += prompt
-	}
-	if !v.Shell {
-		cfg.System += "\n\nSession note: the shell tool is disabled. Do not call it; " +
-			"use the file tools only and clearly explain anything you cannot run or verify."
-	}
-	if v.Verify != "" {
-		timeout := time.Duration(v.VerifyTimeoutSec) * time.Second
-		cfg.Verify = func(ctx context.Context) (string, error) {
-			return runVerifyCommand(ctx, v.Verify, *dir, timeout)
-		}
-	}
-	if cp != nil {
-		cfg.BeginTurn = func() { _ = cp.Begin("turn") }
-		cfg.EndTurn = func() { _ = cp.End() }
-	}
-	a := agent.New(cfg)
 
 	// Sessions are saved automatically in interactive modes. One-shot runs stay
 	// ephemeral unless a session was explicitly requested.
@@ -933,6 +903,33 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 					}
 					fmt.Fprintf(os.Stderr, "%s%s\n", mark, m.ID)
 				}
+				continue
+			case "/thinking":
+				fields := strings.Fields(line)
+				if len(fields) > 1 {
+					if opts.Router == nil {
+						fmt.Fprintln(os.Stderr, "thinking level switching is not available")
+						continue
+					}
+					lvl, _ := llm.ParseThinkingLevel(fields[1])
+                    opts.Router.SetThinking(lvl)
+                    fmt.Fprintf(os.Stderr, "thinking: %s\n", lvl.String())
+                    continue
+				}
+				fmt.Fprintf(os.Stderr, "current thinking: %s\n", opts.Router.Thinking().String())
+				fmt.Fprint(os.Stderr, "available:  ")
+				for i, l := range llm.Levels() {
+					if l == opts.Router.Thinking() {
+						fmt.Fprintf(os.Stderr, "*%s ", l.String())
+					} else {
+						fmt.Fprintf(os.Stderr, "%s ", l.String())
+					}
+					if i < len(llm.Levels())-1 {
+						fmt.Fprint(os.Stderr, "  ")
+					}
+				}
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "change with /thinking <level>")
 				continue
 			case "/compact":
 				compactCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)

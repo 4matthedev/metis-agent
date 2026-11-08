@@ -3,6 +3,7 @@
   "base_url": "",
   "model": "",
   "temperature": 0.3,
+  "thinking": "none",
   "max_steps": 40,
   "window": 64,
   "shell": true,

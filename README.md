@@ -173,6 +173,7 @@ run. `Esc` dismisses the menu.
 | `/autoapprove [on\|off]` | Toggle or set automatic approval |
 | `/approve-edits [on\|off]` | Review in-project file edits with a diff before writing |
 | `/model [name]` | List available models or switch the active model |
+| `/thinking [level]` | Set reasoning effort (`none`/`low`/`medium`/`high`/`xhigh`) |
 | `/compact` | Summarize the conversation and free context |
 | `/context` | Show message and approximate token usage |
 | `/undo` | Restore files changed by the previous turn |
@@ -317,6 +318,30 @@ For editors and scripts, `--json` streams one JSON object per line on stdout
 notices stay on stderr. Combine it with `--once` for a request/response
 adapter, or with `--plain` for an interactive stream.
 
+`--acp` turns Metis into an [Agent Client Protocol](https://agentclientprotocol.com)
+server over stdin/stdout, so an editor can drive it directly. It implements
+`initialize`, `session/new`, `session/prompt`, `session/cancel`,
+`session/set_mode`, `session/close`, and streams `session/update`
+notifications for text and tool calls. Tool approvals use
+`session/request_permission`, including the diff preview from `--approve-edits`.
+`sessions` are independent agents with their own working directory. Not yet
+implemented: `session/load`, client `fs/*` and `terminal/*` methods, and
+per-session MCP servers (Metis uses its configured MCP servers).
+
+**Semantic search.** Set an embedding model to add the `semantic_search` tool:
+
+```sh
+ollama pull nomic-embed-text
+metis-agent --embedding-model nomic-embed-text
+```
+
+The repository is chunked, embedded through the provider's OpenAI-compatible
+`/v1/embeddings` endpoint, and cached under the data directory. The cache is
+keyed by the model and invalidated when file sizes or timestamps change; pass
+`rebuild=true` to the tool after large edits. Without an embedding model the
+tool is not offered to the model. This works with any provider that exposes
+`/v1/embeddings`.
+
 ## Flags
 
 | Flag | Default | Description |
@@ -340,6 +365,7 @@ adapter, or with `--plain` for an interactive stream.
 | `--verify-timeout N` | `120` | Auto-verify timeout in seconds |
 | `--fallback-models L` | — | Comma-separated models to try when the active one fails |
 | `--instructions L` | — | Comma-separated extra instruction files |
+| `--embedding-model M` | — | Embedding model that enables `semantic_search` (for example `nomic-embed-text`) |
 | `--highlight` | `auto` | `auto`, `dark`, `light`, or `off` |
 | `--config` | — | Load a specific config file |
 | `--no-config` | `false` | Ignore config files |
@@ -350,6 +376,7 @@ adapter, or with `--plain` for an interactive stream.
 | `--no-session` | `false` | Disable session persistence |
 | `--plain` | `false` | Disable the TUI and use the line REPL |
 | `--json` | `false` | Stream NDJSON events on stdout (implies non-TUI) |
+| `--acp` | `false` | Run as an Agent Client Protocol server over stdin/stdout |
 | `--once TASK` | — | Single-shot mode (no TUI) |
 | `--doctor` | `false` | Diagnose the installation and model backend |
 | `--update` | `false` | Download and install the latest release |
@@ -365,8 +392,9 @@ variables, and flags, in that order (later wins). Run `--init-config` to write
 a starter file. Environment variables use the `METIS_` prefix, for example
 `METIS_PROVIDER`, `METIS_MODEL`, `METIS_AUTO_APPROVE`,
 `METIS_SHELL_TIMEOUT_SEC`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`,
-`METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, and
-`METIS_FALLBACK_MODELS`. See `internal/config/config.go` for the full set.
+`METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, `METIS_FALLBACK_MODELS`,
+`METIS_THINKING`, and `METIS_EMBEDDING_MODEL`. See `internal/config/config.go`
+for the full set.
 
 Notable fields:
 
@@ -377,6 +405,8 @@ Notable fields:
 | `verify_timeout_sec` | `120` | Timeout for that command |
 | `instructions` | `[]` | Extra instruction files to load into the system prompt |
 | `fallback_models` | `[]` | Models to try in order when the active model fails |
+| `thinking` | `""` | Thinking level (reasoning effort): `none`, `low`, `medium`, `high`, `xhigh` |
+| `embedding_model` | `""` | Embedding model for `semantic_search` (empty disables the tool) |
 
 Instruction files are loaded from the global config directory (`AGENTS.md`,
 `METIS.md`, `rules.md`), then the project (`AGENTS.md`, `METIS.md`,
@@ -428,6 +458,7 @@ its `mcp_servers` array (or the `METIS_MCP_SERVERS` environment variable).
 | `web_search` | `query`, `max_results` | Search the public web without an API key |
 | `download_file` | `url`, `path`, `overwrite`, `timeout_sec`, `max_bytes` | Download a URL and write it into a file atomically |
 | `repo_map` | `path`, `include`, `max_files`, `max_symbols` | Compact symbol map (functions, types, classes) of the repository |
+| `semantic_search` | `query`, `path`, `max_results`, `rebuild` | Meaning-based search over a cached embedding index (requires `--embedding-model`) |
 | `diagnostics` | `path`, `commands`, `timeout_sec`, `stop_on_failure` | Run detected build, type-check, and lint commands |
 | `subagent` | `task` | Delegate an independent read-only investigation to a fresh agent |
 | `system_info` | — | OS, architecture, CPU count, user, temp path, and time |
@@ -546,6 +577,7 @@ metis-agent/
   go.mod
   main.go                         # CLI flags, TUI/REPL/one-shot entrypoints
   features.go                     # JSON events, undo/commit/verify, subagent wiring
+  agent_build.go                  # shared agent construction for CLI and ACP sessions
   scripts/install.sh              # Linux/macOS installer
   scripts/install.ps1             # native Windows installer
   internal/tui/tui.go             # Bubble Tea model, input, events, layout
@@ -562,6 +594,7 @@ metis-agent/
   internal/tools/fs.go            # glob, batch read, stat, refactor, hash, move/copy/delete
   internal/tools/project.go       # project detection and repository summary
   internal/tools/repomap.go       # symbol map across languages
+  internal/tools/semantic.go      # semantic_search tool
   internal/tools/diagnostics.go   # detected build/type-check/lint commands
   internal/tools/websearch.go     # keyless web search
   internal/tools/subagent.go      # read-only delegated research tool
@@ -573,6 +606,8 @@ metis-agent/
   internal/tools/shell.go         # shell tool: execution, timeout, output cap
   internal/config/config.go       # config file, env, and platform paths
   internal/checkpoint/            # per-turn file snapshots for /undo
+  internal/embeddings/            # cached OpenAI-compatible embedding index
+  internal/acp/                   # Agent Client Protocol server (--acp)
   internal/instructions/          # AGENTS.md/METIS.md/rules loading
   internal/redact/                # credential redaction for tool output
   internal/update/                # GitHub release check/download/checksum/replace

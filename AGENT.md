@@ -40,6 +40,7 @@ metis-agent/
 │                               #   version/update/doctor/undo, checkpoints + auto-verify
 ├── features.go                 # NDJSON event sink, undo/commit/verify helpers,
 │                               #   read-only subagent registration
+├── agent_build.go              # shared agent construction (CLI + ACP sessions)
 ├── go.mod                      # module metis-agent; Go 1.25; bubbletea/bubbles/
 │                               #   lipgloss + MCP go-sdk
 ├── go.sum
@@ -53,6 +54,9 @@ metis-agent/
 │   │   ├── modes.go            # Mode prompts + policyForMode (Planner gate)
 │   │   ├── agent_test.go       # fake model tests
 │   │   └── modes_test.go       # posture/policy tests
+│   ├── acp/                    # Agent Client Protocol server (--acp)
+│   │   ├── acp.go              # JSON-RPC over stdio, sessions, permissions
+│   │   └── acp_test.go
 │   ├── checkpoint/             # Per-turn file snapshots for /undo and --undo
 │   │   ├── checkpoint.go       # Manager: Begin/Snapshot/End/Undo, pruning
 │   │   └── checkpoint_test.go
@@ -60,6 +64,9 @@ metis-agent/
 │   │   ├── config.go           # Values, File, Defaults(), ApplyEnv(), Validate()
 │   │   └── config_test.go
 │   ├── doctor/                 # Installation diagnostics for --doctor
+│   ├── embeddings/             # Cached semantic index + OpenAI-compatible client
+│   │   ├── embeddings.go       # index build/search, cache, chunking
+│   │   └── embeddings_test.go
 │   ├── instructions/           # AGENTS.md/METIS.md/CLAUDE.md/rules loading
 │   ├── llm/                    # OpenAI-compatible client
 │   │   ├── client.go           # SSE parser, JSON fallback, streaming, model-not-loaded
@@ -98,6 +105,7 @@ metis-agent/
 │   │   ├── git.go              # git_status/diff/log/show/blame
 │   │   ├── project.go          # language/manifest/git detection, project_info
 │   │   ├── repomap.go          # repo_map symbol outline
+│   │   ├── semantic.go         # semantic_search (embedding index)
 │   │   ├── diagnostics.go      # diagnostics: detected build/type-check/lint
 │   │   ├── websearch.go        # web_search (DuckDuckGo HTML, no API key)
 │   │   ├── subagent.go         # subagent tool wrapper (runner injected from main)
@@ -139,27 +147,33 @@ main.go ──> internal/llm      (resolve provider + model, build Router)
            ──> internal/session (open/save session)
            ──> internal/checkpoint (per-turn snapshots for undo)
            ──> internal/instructions (AGENTS.md/rules prompt sections)
+           ──> internal/embeddings (semantic index, when --embedding-model is set)
            ──> internal/update (--update / --check-update)
            ──> internal/doctor (--doctor)
            ──> internal/agent  (Agent; owns the loop)
                  ──> internal/memory (History)
+           ──> internal/acp    (--acp server; builds one Agent per session)
            ──> internal/tui    (TUI/REPL entry)
 
+agent_build.go  ──> the construction above, shared by main and the ACP factory
 internal/agent   ──> llm (Complete), tools (Registry.Execute), memory (History)
-internal/tools   ──> llm (schema types only), redact (output) — mostly self-contained
+internal/tools   ──> llm (schema types only), redact (output), embeddings (index)
 internal/tui     ──> agent (events), session, tools (approval types)
 internal/session ──> llm (Message), config (DataDir)
 internal/checkpoint ──> config (DataDir)
 internal/instructions ──> config (ConfigDir)
+internal/embeddings ──> standard library only (HTTP client + index)
+internal/acp     ──> agent, tools (approval types), llm (messages)
 internal/doctor  ──> config, checkpoint, instructions, llm, session
 internal/mcp     ──> mcp go-sdk
 ```
-**Rule of thumb:** `internal/llm` is a leaf (no internal deps). `internal/agent`
-depends on `llm`, `memory`, `tools`. `internal/tui` depends on `agent`,
-`session`, `tools`. Never add a dependency *up* the graph (e.g. don't import
-`internal/tools` from `internal/llm`). `features.go` is the only place that
-wires the parent registry, the subagent's read-only registry, and the router
-together.
+**Rule of thumb:** `internal/llm` and `internal/embeddings` are leaves (no
+internal deps). `internal/agent` depends on `llm`, `memory`, `tools`.
+`internal/tui` and `internal/acp` depend on `agent` and `tools`. Never add a
+dependency *up* the graph (e.g. don't import `internal/tools` from
+`internal/llm`). `features.go` wires the parent registry, the subagent's
+read-only registry, and the router; `agent_build.go` wires a complete agent for
+the CLI and for every ACP session.
 
 ---
 
@@ -175,26 +189,32 @@ together.
 |---|---|
 | Global config | `~/.config/metis-agent/config.json` |
 | Project config | `./.metis-agent.json` |
-| Env | `METIS_PROVIDER`, `METIS_MODEL`, `METIS_BASE_URL`, `METIS_API_KEY`, `METIS_TEMPERATURE`, `METIS_MAX_STEPS`, `METIS_WINDOW`, `METIS_SHELL_TIMEOUT_SEC`, `METIS_AUTO_APPROVE`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`, `METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, `METIS_FALLBACK_MODELS`, `METIS_MCP_SERVERS` |
-| Flags | `--provider`, `--model`, `--base-url`, `--temp`, `--max-steps`, `--window`, `--dir`, `--auto-approve`, `--approve-edits`, `--verify`, `--fallback-models`, `--once`, `--json`, `--doctor`, `--update`, `--undo`, … |
+| Env | `METIS_PROVIDER`, `METIS_MODEL`, `METIS_BASE_URL`, `METIS_API_KEY`, `METIS_TEMPERATURE`, `METIS_MAX_STEPS`, `METIS_WINDOW`, `METIS_SHELL_TIMEOUT_SEC`, `METIS_AUTO_APPROVE`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`, `METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, `METIS_FALLBACK_MODELS`, `METIS_EMBEDDING_MODEL`, `METIS_MCP_SERVERS` |
+| Flags | `--provider`, `--model`, `--base-url`, `--temp`, `--thinking`, `--max-steps`, `--window`, `--dir`, `--auto-approve`, `--approve-edits`, `--verify`, `--fallback-models`, `--embedding-model`, `--once`, `--json`, `--acp`, `--doctor`, `--update`, `--undo`, … |
 
 The config file shape (`internal/config/File`) uses **pointers** so an unset field
 doesn't override a zero value. `File.Apply(&v)` overlays only non-nil fields.
 `METIS_MCP_SERVERS` is a JSON array of `mcp.ServerConfig`, merged over file
 servers (same-name entries from env win).
 
-Key flags (defaults): `--temp 0.3`, `--max-steps 40`, `--window 64`,
-`--shell-timeout 120` (clamped 1–900 in the shell tool), `--dir .`,
+Key flags (defaults): `--temp 0.3`, `--thinking none`, `--max-steps 40`,
+`--window 64`, `--shell-timeout 120` (clamped 1–900 in the shell tool), `--dir .`,
 `--no-shell`, `--plain`, `--once`, `--session NAME`, `--resume`, `--no-session`,
 `--list-models`, `--init-config`, `--highlight auto|dark|light|off`,
 `--redact-secrets` (default on; `--no-redact` turns it off),
-`--verify-timeout 120`, `--approve-edits`, `--json`.
+`--verify-timeout 120`, `--approve-edits`, `--json`, `--acp`,
+`--embedding-model NAME`.
 
 Feature-only config fields: `redact_secrets *bool`, `verify *string`,
-`verify_timeout_sec *int`, `instructions []string`, `fallback_models []string`.
-`WriteDefault` writes all of them so `--init-config` documents the available
-knobs. `instructions` entries may be absolute or relative to `--dir`; they are
-loaded after the conventional global and project files.
+`verify_timeout_sec *int`, `instructions []string`, `fallback_models []string`,
+`thinking *string` (reasoning effort: `none`, `low`, `medium`, `high`, `xhigh`),
+`embedding_model *string`. `WriteDefault` writes all of them so `--init-config`
+documents the available knobs. `instructions` entries may be absolute or
+relative to `--dir`; they are loaded after the conventional global and project
+files. `thinking` maps to `llm.ThinkingLevel` and is sent to the provider as
+`reasoning_effort` in each chat completion; empty/`none` omits the field so the
+server uses its own default. `embedding_model` enables the `semantic_search`
+tool; an empty value keeps it out of the tool list entirely.
 
 ---
 
@@ -306,6 +326,8 @@ for the test vectors).
 Registered in `registry.go` in groups:
 - **Discovery/reading:** `list_dir`, `glob`, `project_info`, `repo_map`,
   `file_read`, `file_read_many`, `file_stat`, `search`, `hash_file`, `json_query`
+- **Semantic search:** `semantic_search` (registered by `agent_build.go` only
+  when `embedding_model` is set; cached under `<dataDir>/embeddings`)
 - **Editing/filesystem:** `file_edit`, `multi_edit`, `replace_in_files`,
   `file_write`, `make_dir`, `file_move`, `file_copy`, `file_delete`, `diff_files`
 - **Git:** `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
@@ -318,7 +340,11 @@ Registered in `registry.go` in groups:
 - **Time:** `time`
 
 `web_search` scrapes DuckDuckGo's HTML endpoints, so it needs no API key; it is
-read-only and not approval-gated. `subagent` runs a fresh `agent.Agent` against
+read-only and not approval-gated. `semantic_search` chunks text files (60-line
+windows, 8-line overlap, ignored build/VCS directories, 512 KB per-file cap),
+embeds them through `/v1/embeddings`, and ranks chunks with cosine similarity.
+The cache is invalidated by a file size/mtime fingerprint; `rebuild=true`
+forces a refresh. `subagent` runs a fresh `agent.Agent` against
 a separate registry with `SetPolicy(readOnlyPolicy)`, which allows reads,
 search, git inspection, web fetches, and `repo_map` but refuses every mutation
 and `shell`. The nested registry never contains `subagent` itself, so recursion
@@ -570,9 +596,50 @@ Bubble Tea model (`tui.go`, ~1400 lines):
   respect Esc cancellation.
 
 Slash commands (TUI): `/help /clear /reset /status /tools /expand /session /sessions /new /resume [id] /autoapprove [on|off] /approve-edits [on|off] /model [name] /compact /context /undo /commit [message] /mcp /skills /mode /quit`.
+
+`/commit [message]` stages everything with `git add -A`, then commits. When the
+message is empty it asks the model for a **Conventional Commits** message
+(imperative mood, scope when obvious) based on `git status --porcelain` +
+`git diff HEAD`; if the model is unavailable or returns nothing it falls back
+to `chore: update project files`. `git status --porcelain` is checked first —
+a clean tree returns "nothing to commit" without calling the model.
 Plain REPL supports the same set except `/expand`, `/session`, `/sessions`,
 `/new`, `/resume`, and `/mode`; entering `/` prints the full list.
 `/mcp [list|add|remove|reconnect]` manages MCP servers (see §8).
+
+### ACP server (`internal/acp/`)
+
+`metis-agent --acp` speaks JSON-RPC 2.0 over stdin/stdout using newline-delimited
+messages. The reader loop dispatches each request in its own goroutine so
+`session/cancel` and permission responses stay live while a prompt runs.
+
+- `initialize` returns protocol version 1, `agentInfo`, and the supported
+  capabilities (`agentCapabilities.loadSession: false`, `promptCapabilities.embeddedContext:
+  true`, `image`/`audio` false). It also handles `authenticate` (returns an
+  empty object — Metis does not require auth).
+- `session/new` validates an absolute `cwd`, calls the factory from
+  `agent_build.go`, and installs a per-session approver.
+- `session/prompt` flattens text/resource content and calls `Agent.Run`.
+  Streaming text becomes `agent_message_chunk`; each tool call becomes
+  `tool_call` + `tool_call_update` (pending → completed/failed). The response
+  is `{stopReason: end_turn|max_turn_requests|cancelled}`.
+- Approvals call `session/request_permission` with `allow_once`,
+  `allow_always`, and `reject_once` options; the diff preview is included as
+  content blocks. `session/cancel` (sent as a notification, no id) cancels the
+  active run's context.
+- `session/set_mode` takes a `modeId` (`general`/`0`, `planner`/`1`, `builder`/`2`,
+  `debugger`/`3`, `cybersecurity`/`4`, `simplifier`/`5`, or a number) and calls
+  `Agent.SetMode`, emitting a `current_mode_update` session update. Unknown
+  mode ids are rejected with a `-32602` error.
+- `session/close` deletes the session and cancels any running prompt, then runs
+  the factory's cleanup. A `sessionId` that isn't registered (e.g. calling close
+  on an unknown id, or using a stale id after close) returns a `-32002` error
+  rather than crashing.
+- Text and resource blocks are supported; image/audio blocks are not advertised.
+  `session/load`, client `fs/*`/`terminal/*`, and per-session `mcpServers` are
+  intentionally not implemented yet.
+- The ACP server must be the only writer on stdout. Diagnostics and warnings go
+  to stderr; do not add `fmt.Print*` calls to the ACP path.
 
 ---
 
@@ -693,6 +760,8 @@ that blocks legitimate workflows; do not remove the approval gate either.**
 | How does `--update` work? | `internal/update/update.go` |
 | How does `--doctor` work? | `internal/doctor/doctor.go` |
 | How do model fallbacks work? | `internal/llm/router.go` + `features.go` |
+| How does editor (ACP) mode work? | `internal/acp/acp.go` + `agent_build.go` |
+| How does semantic search work? | `internal/embeddings/embeddings.go` + `internal/tools/semantic.go` |
 | How are MCP tools wired? | `internal/mcp/mcp.go` + `internal/mcp/manager.go` + `main.go` |
 | How are skills discovered/used? | `internal/skills/skill.go` + `manager.go` + `main.go` |
 | What tools exist + their schemas? | `internal/tools/*.go` (`registry.go` order) |

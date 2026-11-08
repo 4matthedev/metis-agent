@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"metis-agent/internal/llm"
 	"metis-agent/internal/mcp"
 )
 
@@ -20,6 +21,7 @@ type Values struct {
 	Model            string
 	APIKey           string
 	Temperature      float64
+	Thinking         string
 	MaxSteps         int
 	Window           int
 	Shell            bool
@@ -32,6 +34,7 @@ type Values struct {
 	VerifyTimeoutSec int
 	Instructions     []string
 	FallbackModels   []string
+	EmbeddingModel   string
 	McpServers       []mcp.ServerConfig
 }
 
@@ -62,6 +65,7 @@ type File struct {
 	Model            *string            `json:"model,omitempty"`
 	APIKey           *string            `json:"api_key,omitempty"`
 	Temperature      *float64           `json:"temperature,omitempty"`
+	Thinking         *string            `json:"thinking,omitempty"`
 	MaxSteps         *int               `json:"max_steps,omitempty"`
 	Window           *int               `json:"window,omitempty"`
 	Shell            *bool              `json:"shell,omitempty"`
@@ -74,6 +78,7 @@ type File struct {
 	VerifyTimeoutSec *int               `json:"verify_timeout_sec,omitempty"`
 	Instructions     []string           `json:"instructions,omitempty"`
 	FallbackModels   []string           `json:"fallback_models,omitempty"`
+	EmbeddingModel   *string            `json:"embedding_model,omitempty"`
 	McpServers       []mcp.ServerConfig `json:"mcp_servers,omitempty"`
 }
 
@@ -129,6 +134,12 @@ func (f File) Apply(v *Values) {
 	}
 	if len(f.FallbackModels) > 0 {
 		v.FallbackModels = cleanList(f.FallbackModels)
+	}
+	if f.EmbeddingModel != nil {
+		v.EmbeddingModel = strings.TrimSpace(*f.EmbeddingModel)
+	}
+	if f.Thinking != nil {
+		v.Thinking = strings.TrimSpace(*f.Thinking)
 	}
 	if len(f.McpServers) > 0 {
 		v.McpServers = f.McpServers
@@ -306,6 +317,12 @@ func ApplyEnv(v *Values) error {
 	if s := strings.TrimSpace(os.Getenv("METIS_FALLBACK_MODELS")); s != "" {
 		v.FallbackModels = splitList(s)
 	}
+	if s := strings.TrimSpace(os.Getenv("METIS_EMBEDDING_MODEL")); s != "" {
+		v.EmbeddingModel = s
+	}
+	if s := strings.TrimSpace(os.Getenv("METIS_THINKING")); s != "" {
+		v.Thinking = s
+	}
 	if s := strings.TrimSpace(os.Getenv("METIS_MCP_SERVERS")); s != "" {
 		var servers []mcp.ServerConfig
 		if err := json.Unmarshal([]byte(s), &servers); err != nil {
@@ -316,7 +333,14 @@ func ApplyEnv(v *Values) error {
 	return nil
 }
 
+// ThinkingLevel parses the user-facing thinking string into the llm type.
+func (v Values) ThinkingLevel() llm.ThinkingLevel {
+	l, _ := llm.ParseThinkingLevel(v.Thinking)
+	return l
+}
+
 // Validate checks the resolved values.
+
 func (v Values) Validate() error {
 	if strings.TrimSpace(v.Provider) == "" {
 		return fmt.Errorf("provider must not be empty")
@@ -366,6 +390,8 @@ func WriteDefault(path string, v Values) error {
 		VerifyTimeoutSec: &v.VerifyTimeoutSec,
 		Instructions:     v.Instructions,
 		FallbackModels:   v.FallbackModels,
+		EmbeddingModel:   &v.EmbeddingModel,
+		Thinking:         &v.Thinking,
 		McpServers:       v.McpServers,
 	}
 	b, err := json.MarshalIndent(f, "", "  ")

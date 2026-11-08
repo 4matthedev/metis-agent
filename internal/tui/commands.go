@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"metis-agent/internal/llm"
 )
 
 // slashCommand describes one command shown in the completion menu.
@@ -36,6 +37,7 @@ var slashCommands = []slashCommand{
 	{"/autoapprove", "[on|off]", "toggle or set automatic approval"},
 	{"/approve-edits", "[on|off]", "review file edits with a diff before writing"},
 	{"/model", "[name]", "list models or switch the active model"},
+	{"/thinking", "[level]", "list thinking levels or set reasoning effort"},
 	{"/compact", "", "summarize the conversation to free context"},
 	{"/context", "", "show context usage"},
 	{"/undo", "", "restore files changed by the previous turn"},
@@ -298,8 +300,12 @@ func (m *Model) command(text string) tea.Cmd {
 		if m.expandTools {
 			output = "expanded"
 		}
-		text := fmt.Sprintf("provider  %s\nmodel     %s\nserver    %s\nproject   %s\napproval  %s\ntools     %d\noutput    %s",
-			m.opts.Provider, m.currentModel(), m.opts.Server, m.opts.Dir, approval, len(m.opts.Tools), output)
+		thinking := "none"
+		if m.opts.ThinkingLevel != nil {
+			thinking = m.opts.ThinkingLevel().String()
+		}
+		text := fmt.Sprintf("provider  %s\nmodel     %s\nthinking  %s\nserver    %s\nproject   %s\napproval  %s\ntools     %d\noutput    %s",
+			m.opts.Provider, m.currentModel(), thinking, m.opts.Server, m.opts.Dir, approval, len(m.opts.Tools), output)
 		m.blocks = append(m.blocks, block{kind: blockSystem, text: text})
 		m.input.Reset()
 		m.layout()
@@ -423,6 +429,41 @@ func (m *Model) command(text string) tea.Cmd {
 		m.input.Reset()
 		m.layout()
 		m.syncViewport(false)
+	case "/thinking":
+		if len(fields) > 1 {
+			level := strings.TrimSpace(fields[1])
+			parsed, _ := llm.ParseThinkingLevel(level)
+			if m.opts.SetThinking == nil {
+				m.blocks = append(m.blocks, block{kind: blockError, text: "thinking level switching is not available"})
+			} else if err := m.opts.SetThinking(parsed); err != nil {
+				m.blocks = append(m.blocks, block{kind: blockError, text: "thinking: " + err.Error()})
+			} else {
+				m.opts.Thinking = parsed.String()
+				m.blocks = append(m.blocks, block{kind: blockSystem, text: "thinking: " + parsed.String()})
+			}
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
+		}
+		// No argument: show current and available levels.
+		cur := m.opts.ThinkingLevel()
+		var b strings.Builder
+		fmt.Fprintf(&b, "current thinking: %s\navailable:  ", cur.String())
+		for _, lvl := range llm.Levels() {
+			if lvl == cur {
+				fmt.Fprintf(&b, "*%s ", lvl.String())
+			} else {
+				fmt.Fprintf(&b, "%s ", lvl.String())
+			}
+			}
+			fmt.Fprintf(&b, "(none = server default)")
+			b.WriteString("\nchange with /thinking <level>")
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: b.String()})
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
 	case "/compact":
 		if m.running {
 			return nil
@@ -583,6 +624,7 @@ const helpText = `Commands
   /autoapprove [on|off] toggle or set automatic approval
   /approve-edits [on|off] review file edits with a diff first
   /model [name]      list models or switch the active model
+  /thinking [level]  list thinking levels or set reasoning effort
   /compact           summarize the conversation to free context
   /context           show context usage
   /undo              restore files changed by the previous turn
