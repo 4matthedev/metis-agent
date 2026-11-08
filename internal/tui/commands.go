@@ -457,8 +457,8 @@ func (m *Model) command(text string) tea.Cmd {
 			} else {
 				fmt.Fprintf(&b, "%s ", lvl.String())
 			}
-			}
-			fmt.Fprintf(&b, "(none = server default)")
+		}
+		fmt.Fprintf(&b, "(none = server default)")
 			b.WriteString("\nchange with /thinking <level>")
 			m.blocks = append(m.blocks, block{kind: blockSystem, text: b.String()})
 			m.input.Reset()
