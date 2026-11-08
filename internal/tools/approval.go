@@ -121,7 +121,9 @@ func (r *Registry) needApproval(name string, args map[string]any) (ApprovalReque
 
 	switch name {
 	case "shell":
-		req.Summary = "$ " + oneLineLimit(path("command"), 400)
+		// Show the command verbatim. Truncating the preview would let a
+		// payload hide past the cut, which defeats the approval gate.
+		req.Summary = "$ " + path("command")
 		req.Reason = "shell commands can modify files, run programs, and access the network."
 		return req, true
 

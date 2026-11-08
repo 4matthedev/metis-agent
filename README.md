@@ -140,7 +140,7 @@ Each prompt keeps the previous turns in the conversation (bounded by
 
 ## Modes
 
-Metis can operate in five postures, each of which rewrites the **system prompt**
+Metis can operate in six postures, each of which rewrites the **system prompt**
 sent to the model on every turn (the shared tool list and core rules are
 preserved; a mode-specific section is appended):
 
@@ -157,6 +157,12 @@ Switch modes with the **Tab** key (when the input is empty) to cycle through
 them, or with `/mode <name>` (`general`, `planner`, `builder`, `debugger`,
 `cybersecurity`, `simplifier`). The active mode is shown in the status bar and
 confirmed as a transcript line on each switch.
+
+**Planner is enforced, not just suggested.** In Planner mode the registry hides
+and refuses every mutating tool — `shell`, the file-writing tools,
+`download_file`, non-GET `http_fetch`, external MCP tools, and the skills `run`
+action — even when `--auto-approve` is on. The allowlist lives in
+`internal/agent/modes.go`.
 
 ## Approvals
 
@@ -413,3 +419,18 @@ metis-agent/
 
 The client also accepts servers that ignore `stream: true` and return a
 single JSON completion.
+
+## Development
+
+```sh
+make check   # gofmt + vet + build + tests
+make race    # tests with the race detector
+make cover   # coverage summary
+```
+
+CI runs `gofmt`, `go vet`, `go build`, `go test -race`, and cross-builds for
+macOS and Windows.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCompleteParsesStreamedToolCalls(t *testing.T) {
@@ -109,5 +110,65 @@ func TestInvalidToolArgumentsReported(t *testing.T) {
 	_, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid tool call arguments") {
 		t.Fatalf("err = %v, want invalid arguments error", err)
+	}
+}
+
+// TestStalledStreamIsAborted verifies the idle watchdog: a stream that stops
+// sending bytes is cancelled with a clear error instead of hanging forever or
+// surfacing a bare context.Canceled.
+func TestStalledStreamIsAborted(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { streamIdleTimeout = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // hold the connection open until the client gives up
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-model", 0.1)
+	start := time.Now()
+	_, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
+	if err == nil {
+		t.Fatal("expected the stalled stream to fail")
+	}
+	if !strings.Contains(err.Error(), "stream stalled") {
+		t.Fatalf("err = %v, want a stalled-stream message", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("watchdog took %s, want it to fire near the configured timeout", elapsed)
+	}
+}
+
+// TestSlowSteadyStreamSurvives documents the point of an idle timeout: a stream
+// whose total duration exceeds the idle window is fine as long as bytes keep
+// arriving.
+func TestSlowSteadyStreamSurvives(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 120 * time.Millisecond
+	t.Cleanup(func() { streamIdleTimeout = old })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		for _, word := range []string{"slow", " but", " steady"} {
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", word)
+			fl.Flush()
+			time.Sleep(40 * time.Millisecond) // total > idle window, each gap < it
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-model", 0.1)
+	comp, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("steady stream was killed: %v", err)
+	}
+	if comp.Content != "slow but steady" {
+		t.Fatalf("content = %q", comp.Content)
 	}
 }

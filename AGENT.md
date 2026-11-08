@@ -190,11 +190,19 @@ is identical across modes. Modes are: `ModeGeneral` (default), `ModePlanner`,
   while `Run` is executing** (the lock is held for the whole run), or it
   deadlocks. The TUI only switches modes when `m.running` is false.
 - Out-of-range modes clamp to `ModeGeneral` (in `New` and `SetMode`).
+- **Planner mode is enforced in code, not just the prompt.** `policyForMode` in
+  `internal/agent/modes.go` returns a `tools.Policy`; the registry consults it
+  before approval, so auto-approve cannot bypass it. In Planner, mutating
+  tools, `shell`, non-GET `http_fetch`, external MCP tools, and the skills
+  `run` action are refused and hidden from `Registry.Specs()`. The allowlist is
+  `plannerReadOnly`; a new tool stays out of Planner until added there.
 - Helpers: `ModeName(m)` (e.g. "Builder") and `ModeDescription(m)` (one-liner)
   for UI display.
-- The TUI (`internal/tui/tui.go`) exposes mode switching via the **Tab** key
-  (when the input is empty) and the `/mode [name]` command; the active mode is
-  shown in the status bar and footer.
+- The TUI (`internal/tui/`) exposes mode switching via the **Tab** key (when
+  the input is empty) and the `/mode [name]` command; the active mode is shown
+  in the status bar and footer. TUI files are split by concern: `tui.go`
+  (model/update), `commands.go` (slash commands), `sessions.go`, `approvals.go`,
+  `view.go`, plus the rendering helpers (`styles.go`, `markdown.go`, `diff.go`).
 
 ---
 

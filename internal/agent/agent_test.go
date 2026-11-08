@@ -149,12 +149,12 @@ func TestRunMaxSteps(t *testing.T) {
 	if !errors.Is(err, ErrMaxSteps) {
 		t.Fatalf("err = %v, want ErrMaxSteps", err)
 	}
-	if a.hist.Len() != 0 {
-		t.Errorf("history was not rolled back after max steps: %d messages", a.hist.Len())
+	if got := a.ExportHistory(); len(got) != 1 || got[0].Role != "user" || got[0].Content != "loop" {
+		t.Errorf("history after max steps = %+v, want only the user turn", got)
 	}
 }
 
-func TestRunRollsBackFailedTurn(t *testing.T) {
+func TestRunKeepsFailedTurnForRetry(t *testing.T) {
 	call := &llm.Completion{
 		ToolCalls: []llm.ToolCall{{ID: "c", Type: "function", Function: llm.ToolFunctionWire{Name: "echo", Arguments: `{}`}}},
 	}
@@ -167,16 +167,22 @@ func TestRunRollsBackFailedTurn(t *testing.T) {
 	if _, err := a.Run(context.Background(), "bad"); err == nil {
 		t.Fatal("expected the first run to fail")
 	}
-	if a.hist.Len() != 0 {
-		t.Fatalf("history after failed run = %d messages, want 0", a.hist.Len())
+	if got := a.ExportHistory(); len(got) != 1 || got[0].Role != "user" || got[0].Content != "bad" {
+		t.Fatalf("history after failed run = %+v, want only the failed user turn", got)
 	}
+	// The failed attempt is kept so it is visible in the transcript and the
+	// session can be resumed; the retry still runs normally.
 	if _, err := a.Run(context.Background(), "good"); err != nil {
 		t.Fatal(err)
 	}
+	var sawFailed bool
 	for _, m := range fc.prompts[len(fc.prompts)-1] {
-		if m.Content == "bad" {
-			t.Error("failed turn leaked into the next prompt")
+		if m.Role == "user" && m.Content == "bad" {
+			sawFailed = true
 		}
+	}
+	if !sawFailed {
+		t.Error("expected the failed user turn to remain in history for retry")
 	}
 }
 
@@ -224,8 +230,8 @@ func TestRunCancelsToolContext(t *testing.T) {
 	if !sawDone {
 		t.Fatal("tool handler did not observe cancellation")
 	}
-	if a.hist.Len() != 0 {
-		t.Errorf("history after cancellation = %d, want 0", a.hist.Len())
+	if got := a.ExportHistory(); len(got) != 1 || got[0].Role != "user" || got[0].Content != "cancel it" {
+		t.Errorf("history after cancellation = %+v, want only the user turn", got)
 	}
 }
 
@@ -317,5 +323,56 @@ func TestRunUsesModeSection(t *testing.T) {
 	}
 	if !strings.Contains(system, "PLANNER mode") {
 		t.Errorf("system prompt sent to model missing 'PLANNER mode': mode was not applied")
+	}
+}
+
+// TestRunKeepsUserTurnOnModelError verifies that a failed model call leaves the
+// user's message in history, so it can be retried and is visible when the
+// session is saved. Any partial assistant/tool group from the failed run must
+// be dropped, because servers reject an incomplete tool-call group.
+func TestRunKeepsUserTurnOnModelError(t *testing.T) {
+	fc := &fakeCompleter{errs: []error{errors.New("connection reset")}}
+	a, _ := newTestAgent(t, fc, 3)
+
+	if _, err := a.Run(context.Background(), "fix the bug"); err == nil {
+		t.Fatal("expected the model error to surface")
+	}
+	hist := a.ExportHistory()
+	if len(hist) != 1 || hist[0].Role != "user" || hist[0].Content != "fix the bug" {
+		t.Fatalf("history after failure = %+v, want only the user turn", hist)
+	}
+}
+
+// TestRunKeepsUserTurnOnCancel covers the cancelled-context path.
+func TestRunKeepsUserTurnOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fc := &fakeCompleter{responses: []*llm.Completion{{Content: "never"}}}
+	a, _ := newTestAgent(t, fc, 3)
+
+	if _, err := a.Run(ctx, "long task"); err == nil {
+		t.Fatal("expected cancellation")
+	}
+	hist := a.ExportHistory()
+	if len(hist) != 1 || hist[0].Role != "user" {
+		t.Fatalf("history after cancel = %+v, want only the user turn", hist)
+	}
+}
+
+// TestRunDropsPartialToolGroupOnMaxSteps verifies that exhausting the budget
+// keeps the user turn but removes the partial tool-call chain.
+func TestRunDropsPartialToolGroupOnMaxSteps(t *testing.T) {
+	call := &llm.Completion{
+		ToolCalls: []llm.ToolCall{{ID: "c1", Type: "function", Function: llm.ToolFunctionWire{Name: "echo", Arguments: `{}`}}},
+	}
+	fc := &fakeCompleter{responses: []*llm.Completion{call, call}}
+	a, _ := newTestAgent(t, fc, 2)
+
+	if _, err := a.Run(context.Background(), "keep going"); !errors.Is(err, ErrMaxSteps) {
+		t.Fatalf("err = %v, want ErrMaxSteps", err)
+	}
+	hist := a.ExportHistory()
+	if len(hist) != 1 || hist[0].Role != "user" || hist[0].Content != "keep going" {
+		t.Fatalf("history after max steps = %+v, want only the user turn", hist)
 	}
 }

@@ -186,7 +186,7 @@ var modeSections = []string{
 	// General
 	"You operate in general mode: handle the task end-to-end. Explore before you edit, make the smallest correct change, and verify the result with a build, test, or linter where possible.",
 	// Planner
-	"You operate in PLANNER mode. Your job is to analyze and plan — not to implement. Explore the codebase with project_info, list_dir, glob, search, and file_read. Identify the goal, constraints, risks, and trade-offs. Prefer multiple approaches and recommend the best one with reasoning. Do not modify code, do not run destructive shell commands, and do not call file_write / file_edit / file_move / file_copy / file_delete. End with a clear, actionable plan (numbered steps) the user can approve. Use shell only for read-only, safe, non-mutating checks (e.g. git log, file existence). When the plan is complete, stop and let the user decide the next step.",
+	"You operate in PLANNER mode. Your job is to analyze and plan — not to implement. Explore the codebase with project_info, list_dir, glob, search, and file_read. Identify the goal, constraints, risks, and trade-offs. Prefer multiple approaches and recommend the best one with reasoning. Planner mode is enforced as read-only: the shell and all mutating tools are unavailable, so if a step requires running a command or changing a file, put it in the plan for the user to execute or approve. End with a clear, actionable plan (numbered steps) the user can approve, then stop and let the user decide the next step.",
 	// Builder
 	"You operate in BUILDER mode. Your job is to implement and refine code. Use file_edit, multi_edit, file_write, and file_move/copy for precise changes. Make the smallest correct edit; do not rewrite more than necessary. Prefer file tools over shell for filesystem work. After each change, verify with the build, tests, or linter that applies. Keep changes focused and reviewable. Use git tools to inspect current changes (git_status, git_diff) before you finish. If a verification fails, read the error and fix it, then re-verify. Do not ship unverified work.",
 	// Debugger
@@ -229,6 +229,9 @@ func New(cfg Config) *Agent {
 	mode := cfg.Mode
 	if mode < ModeGeneral || mode > ModeSimplifier {
 		mode = ModeGeneral
+	}
+	if cfg.Registry != nil {
+		cfg.Registry.SetPolicy(policyForMode(mode))
 	}
 	return &Agent{cfg: cfg, mode: mode, hist: memory.NewHistory(cfg.Window)}
 }
@@ -273,6 +276,8 @@ func (a *Agent) SetEventSink(fn func(Event)) {
 // System returns the full system prompt: the base prompt with the active mode
 // section appended.
 func (a *Agent) System() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return buildSystemPrompt(a.cfg.System, a.modeSection())
 }
 
@@ -291,6 +296,9 @@ func (a *Agent) SetMode(m Mode) {
 		m = ModeGeneral
 	}
 	a.mode = m
+	if a.cfg.Registry != nil {
+		a.cfg.Registry.SetPolicy(policyForMode(m))
+	}
 	a.mu.Unlock()
 }
 
@@ -330,7 +338,7 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			a.hist.Truncate(base)
+			a.hist.Truncate(base + 1)
 			a.emit(Event{Kind: EventError, Step: step + 1, Err: err})
 			return "", err
 		}
@@ -340,7 +348,7 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 			a.emit(Event{Kind: EventText, Step: step + 1, Text: s})
 		})
 		if err != nil {
-			a.hist.Truncate(base)
+			a.hist.Truncate(base + 1)
 			a.emit(Event{Kind: EventError, Step: step + 1, Err: err})
 			return "", err
 		}
@@ -353,7 +361,7 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 			})
 			for _, call := range comp.ToolCalls {
 				if err := ctx.Err(); err != nil {
-					a.hist.Truncate(base)
+					a.hist.Truncate(base + 1)
 					a.emit(Event{Kind: EventError, Step: step + 1, Err: err})
 					return "", err
 				}
@@ -391,7 +399,7 @@ func (a *Agent) Run(ctx context.Context, user string) (string, error) {
 	}
 
 	err := fmt.Errorf("%w (%d)", ErrMaxSteps, a.cfg.MaxSteps)
-	a.hist.Truncate(base)
+	a.hist.Truncate(base + 1)
 	a.emit(Event{Kind: EventError, Step: a.cfg.MaxSteps, Err: err})
 	return "", err
 }

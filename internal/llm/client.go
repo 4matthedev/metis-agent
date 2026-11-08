@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -74,6 +75,69 @@ type ClientOptions struct {
 	HTTPClient *http.Client
 }
 
+// HTTP tuning. There is deliberately no total http.Client.Timeout: local
+// models can stream for a long time, and a whole-request deadline would cut a
+// healthy generation. Instead the transport bounds connection setup, and the
+// response body is wrapped with an idle watchdog that aborts only when no
+// bytes arrive for defaultIdleTimeout.
+const (
+	defaultDialTimeout           = 30 * time.Second
+	defaultTLSHandshakeTimeout   = 15 * time.Second
+	defaultResponseHeaderTimeout = 10 * time.Minute
+	defaultIdleTimeout           = 5 * time.Minute
+)
+
+// errIdleTimeout marks a stalled stream so callers can report it clearly
+// instead of surfacing context.Canceled.
+var errIdleTimeout = errors.New("stream stalled: no data received")
+
+// streamIdleTimeout is a variable so tests can shrink it.
+var streamIdleTimeout = defaultIdleTimeout
+
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			DialContext:           (&net.Dialer{Timeout: defaultDialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+			ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+			ExpectContinueTimeout: time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+}
+
+// idleTimeoutReader cancels its request when no bytes arrive for d. Each
+// successful read resets the timer, so slow-but-steady streams are unaffected.
+type idleTimeoutReader struct {
+	r     io.Reader
+	timer *time.Timer
+	d     time.Duration
+}
+
+func newIdleTimeoutReader(r io.Reader, cancel context.CancelCauseFunc, d time.Duration) *idleTimeoutReader {
+	it := &idleTimeoutReader{r: r, d: d}
+	it.timer = time.AfterFunc(d, func() { cancel(errIdleTimeout) })
+	return it
+}
+
+func (it *idleTimeoutReader) Read(p []byte) (int, error) {
+	n, err := it.r.Read(p)
+	if n > 0 {
+		it.timer.Reset(it.d)
+	}
+	return n, err
+}
+
+func (it *idleTimeoutReader) Close() error {
+	it.timer.Stop()
+	if c, ok := it.r.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 // NewClient builds a Client for the given OpenAI-compatible base URL.
 // It is kept for backward compatibility; new code should prefer
 // NewClientWithOptions.
@@ -94,7 +158,7 @@ func NewClient(baseURL, model string, temp float64) *Client {
 			Temp:       temp,
 			ChatURL:    strings.TrimRight(baseURL, "/") + "/v1/chat/completions",
 			ModelsURL:  strings.TrimRight(baseURL, "/") + "/v1/models",
-			httpClient: &http.Client{Timeout: 10 * time.Minute},
+			httpClient: newHTTPClient(),
 		}
 	}
 	return c
@@ -115,7 +179,7 @@ func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 	chatURL, modelsURL, displayBase := endpointURLs(base)
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Minute}
+		httpClient = newHTTPClient()
 	}
 	apiKey := opts.APIKey
 	if apiKey == "" {
@@ -194,7 +258,9 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ChatURL, strings.NewReader(string(body)))
+	reqCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.ChatURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, &ClientError{Cause: err}
 	}
@@ -208,7 +274,8 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	if err != nil {
 		return nil, &ClientError{Cause: err}
 	}
-	defer resp.Body.Close()
+	bodyReader := newIdleTimeoutReader(resp.Body, cancel, streamIdleTimeout)
+	defer bodyReader.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.statusError(resp)
@@ -218,12 +285,29 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	// single JSON object. Handle that as a fallback instead of failing to
 	// parse it as SSE.
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
-		return readJSONCompletion(resp.Body)
+		comp, err := readJSONCompletion(bodyReader)
+		if err != nil {
+			return nil, idleError(reqCtx, err)
+		}
+		return comp, nil
 	}
 
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(bodyReader)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	return readStream(sc, ctx, onToken)
+	comp, err := readStream(sc, reqCtx, onToken)
+	if err != nil {
+		return nil, idleError(reqCtx, err)
+	}
+	return comp, nil
+}
+
+// idleError turns a stalled-stream cause into an actionable error while
+// leaving genuine cancellations untouched.
+func idleError(ctx context.Context, err error) error {
+	if errors.Is(context.Cause(ctx), errIdleTimeout) {
+		return &ClientError{Cause: fmt.Errorf("%w for %s", errIdleTimeout, streamIdleTimeout)}
+	}
+	return err
 }
 
 func (c *Client) statusError(resp *http.Response) error {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"metis-agent/internal/llm"
@@ -15,6 +16,13 @@ import (
 // context. Individual tools may return more; the registry truncates the middle.
 const maxToolResult = 96 * 1024
 
+// Policy decides whether a tool may run in the agent's current posture. It
+// receives the decoded arguments so it can reject a specific action (for
+// example, the mutating "run" action of the skills tool). When args is nil the
+// caller only needs name-level filtering (see Specs). A false result must
+// explain the refusal; that reason is shown to the model.
+type Policy func(name string, args map[string]any) (allowed bool, reason string)
+
 // Registry holds the tools the agent may call and executes them by name.
 type Registry struct {
 	ordered []*Tool
@@ -23,6 +31,10 @@ type Registry struct {
 	// external maps an MCP tool's function name to its source server name.
 	// These run on an untrusted server and always need approval.
 	external map[string]string
+	// policy, when set, removes tools from the model's tool list and refuses
+	// direct calls to them. It is a hard gate; approval cannot override it.
+	policyMu sync.RWMutex
+	policy   Policy
 	approvalState
 }
 
@@ -113,6 +125,27 @@ func (r *Registry) SetAutoApprove(v bool) { r.approvalState.setAutoApprove(v) }
 
 // AutoApprove reports whether dangerous calls run without confirmation.
 func (r *Registry) AutoApprove() bool { return r.approvalState.isAutoApprove() }
+
+// SetPolicy installs the posture gate. A nil policy allows every registered
+// tool. Policies are enforced before approval, so auto-approve cannot bypass
+// them.
+func (r *Registry) SetPolicy(p Policy) {
+	r.policyMu.Lock()
+	r.policy = p
+	r.policyMu.Unlock()
+}
+
+// allow reports whether the policy permits a tool call. It is safe to call
+// with args == nil for name-level filtering.
+func (r *Registry) allow(name string, args map[string]any) (bool, string) {
+	r.policyMu.RLock()
+	p := r.policy
+	r.policyMu.RUnlock()
+	if p == nil {
+		return true, ""
+	}
+	return p(name, args)
+}
 
 // Add registers a tool.
 func (r *Registry) Add(t *Tool) {
@@ -219,11 +252,15 @@ func (r *Registry) List() []Tool {
 	return out
 }
 
-// Specs returns the tools as OpenAI-compatible definitions.
+// Specs returns the tools as OpenAI-compatible definitions. Tools rejected by
+// the active posture policy are omitted so the model does not see them.
 func (r *Registry) Specs() []llm.Tool {
-	out := make([]llm.Tool, len(r.ordered))
-	for i, t := range r.ordered {
-		out[i] = t.spec()
+	out := make([]llm.Tool, 0, len(r.ordered))
+	for _, t := range r.ordered {
+		if ok, _ := r.allow(t.Name, nil); !ok {
+			continue
+		}
+		out = append(out, t.spec())
 	}
 	return out
 }
@@ -245,6 +282,9 @@ func (r *Registry) Execute(ctx context.Context, name string, input []byte) strin
 		args = map[string]any{}
 	} else if err := json.Unmarshal(input, &args); err != nil {
 		return fmt.Sprintf("error: invalid tool arguments: %v", err)
+	}
+	if ok, reason := r.allow(name, args); !ok {
+		return fmt.Sprintf("error: tool %s is not available: %s", name, reason)
 	}
 	if req, ok := r.needApproval(name, args); ok {
 		decision, err := r.approvalState.request(ctx, req)
