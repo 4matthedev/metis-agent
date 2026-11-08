@@ -357,12 +357,12 @@ start_ollama() {
     brew services start ollama >/dev/null 2>&1 || true
   fi
   local i
-  for i in $(seq 1 20); do ollama_healthy && break; sleep 0.5; done
+  for ((i = 0; i < 20; i++)); do ollama_healthy && break; sleep 0.5; done
   if ! ollama_healthy && [ "$DRY_RUN" -eq 0 ]; then
     say "starting Ollama in the background"
     nohup ollama serve >>"$LOG_FILE" 2>&1 &
   fi
-  for i in $(seq 1 120); do ollama_healthy && break; sleep 0.5; done
+  for ((i = 0; i < 120; i++)); do ollama_healthy && break; sleep 0.5; done
   ollama_healthy || warn "Ollama is not answering yet; the launcher will start it when needed"
 }
 
@@ -667,7 +667,7 @@ esac
 healthy() { curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
 wait_for() {
   local url="$1" i
-  for i in $(seq 1 120); do healthy "$url" && return 0; sleep 0.5; done
+  for ((i = 0; i < 120; i++)); do healthy "$url" && return 0; sleep 0.5; done
   return 1
 }
 
