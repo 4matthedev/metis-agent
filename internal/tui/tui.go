@@ -30,6 +30,8 @@ type Options struct {
 	Tools    []string
 	// Highlight enables syntax highlighting for file previews.
 	Highlight bool
+	// Theme is the current color palette name (auto, dark, light).
+	Theme string
 	// AutoApprove runs dangerous tool calls without asking.
 	AutoApprove bool
 	// Mode is the initial operating mode (0-based index into modes). -1
@@ -392,6 +394,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Shift+Tab cycles the thinking level.
+	if msg.String() == "shift+tab" && m.input.Value() == "" && m.suggestions() == nil {
+		if !m.running {
+			m.cycleThinking()
+		}
+		return m, nil
+	}
 	if suggestions := m.suggestions(); len(suggestions) > 0 {
 		switch msg.String() {
 		case "up":
@@ -550,6 +559,28 @@ func (m *Model) switchMode(idx int) {
 func (m *Model) cycleMode() {
 	m.modeIdx = (m.modeIdx + 1) % len(modes)
 	m.switchMode(m.modeIdx)
+}
+
+func (m *Model) cycleThinking() {
+	if m.opts.SetThinking == nil {
+		return
+	}
+	cur := m.opts.ThinkingLevel()
+	levels := llm.Levels()
+	// Find current index
+	idx := 0
+	for i, l := range levels {
+		if l == cur {
+			idx = i
+			break
+		}
+	}
+	next := levels[(idx+1) % len(levels)]
+	if err := m.opts.SetThinking(next); err != nil {
+		return
+	}
+	m.opts.Thinking = next.String()
+	m.syncViewport(false)
 }
 
 func (m *Model) cancelRun() {

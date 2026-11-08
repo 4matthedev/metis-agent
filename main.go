@@ -524,6 +524,7 @@ func main() {
 			Dir:             *dir,
 			Tools:           toolNames,
 			Highlight:       v.Highlight != "off",
+			Theme:           v.Highlight,
 			AutoApprove:     v.AutoApprove,
 			SessionsEnabled: store != nil && sess != nil,
 			Store:           store,

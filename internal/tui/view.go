@@ -166,8 +166,12 @@ func (m *Model) statusView() string {
 	case m.running:
 		left = m.spinner.View() + " " + styleStatusOn.Render(m.status)
 		modeLabel := modes[m.modeIdx].label
-		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  %s  ·  esc cancel",
-			m.step, fmtDuration(time.Since(m.started)), modeLabel, m.contextMeter()))
+		thinking := "off"
+		if m.opts.SetThinking != nil {
+			thinking = m.opts.ThinkingLevel().String()
+		}
+		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  %s  ·  %s  ·  esc cancel",
+			m.step, fmtDuration(time.Since(m.started)), modeLabel, thinking, m.contextMeter()))
 	case m.err != "":
 		msg := oneLine(clean(m.err))
 		left = styleError.Render("● error") + "  " +
@@ -177,17 +181,21 @@ func (m *Model) statusView() string {
 		left = styleDim.Render("○ cancelled")
 	default:
 		modeLabel := modes[m.modeIdx].label
+		thinking := "off"
+		if m.opts.SetThinking != nil {
+			thinking = m.opts.ThinkingLevel().String()
+		}
 		left = styleOK.Render("●") + " " + styleStatus.Render("ready") + "  " +
-			styleStatusOn.Render("· "+modeLabel)
+			styleStatusOn.Render("· "+modeLabel) + "  " + styleDim.Render(thinking)
 		if m.step > 0 {
 			steps := "steps"
 			if m.step == 1 {
 				steps = "step"
 			}
-			right = styleDim.Render(fmt.Sprintf("%d %s  ·  %s  ·  %s  ·  tab mode",
+			right = styleDim.Render(fmt.Sprintf("%d %s  ·  %s  ·  %s  ·  tab mode · shift+tab thinking",
 				m.step, steps, fmtDuration(m.elapsed), m.contextMeter()))
 		} else {
-			right = styleDim.Render(m.contextMeter() + "  ·  tab mode · esc cancel")
+			right = styleDim.Render(m.contextMeter() + "  ·  tab mode · shift+tab thinking · esc cancel")
 		}
 	}
 	return " " + joinLR(left, right, max(10, m.width-2)) + " "

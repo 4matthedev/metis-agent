@@ -38,6 +38,7 @@ var slashCommands = []slashCommand{
 	{"/approve-edits", "[on|off]", "review file edits with a diff before writing"},
 	{"/model", "[name]", "list models or switch the active model"},
 	{"/thinking", "[level]", "list thinking levels or set reasoning effort"},
+	{"/theme", "[auto|dark|light]", "switch the color palette (auto = detect terminal)"},
 	{"/compact", "", "summarize the conversation to free context"},
 	{"/context", "", "show context usage"},
 	{"/undo", "", "restore files changed by the previous turn"},
@@ -464,10 +465,46 @@ func (m *Model) command(text string) tea.Cmd {
 			m.layout()
 			m.syncViewport(false)
 			return nil
-	case "/compact":
-		if m.running {
+		case "/theme":
+			if len(fields) > 1 {
+				mode := strings.ToLower(strings.TrimSpace(fields[1]))
+				valid := map[string]bool{"auto": true, "dark": true, "light": true}
+				if !valid[mode] {
+					m.blocks = append(m.blocks, block{kind: blockError, text: "usage: /theme [auto|dark|light]"})
+					m.input.Reset()
+					m.layout()
+					m.syncViewport(false)
+					return nil
+				}
+				SetTheme(mode)
+				m.opts.Theme = mode
+			m.opts.Highlight = (mode != "off")
+				m.blocks = append(m.blocks, block{kind: blockSystem, text: "theme: " + mode})
+				m.input.Reset()
+				m.layout()
+				m.syncViewport(false)
+				return nil
+			}
+			cur := m.opts.Theme
+			blocks := "auto|dark|light"
+			switch cur {
+			case "auto":
+				blocks = "*auto|dark|light"
+			case "dark":
+				blocks = "auto|*dark|light"
+			default:
+				blocks = "auto|dark|*light"
+			}
+			msg := fmt.Sprintf("current theme: %s (%s)\nchange with /theme [auto|dark|light]", cur, blocks)
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: msg})
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
 			return nil
-		}
+		case "/compact":
+			if m.running {
+				return nil
+			}
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancel = cancel
 		m.running = true
@@ -625,6 +662,7 @@ const helpText = `Commands
   /approve-edits [on|off] review file edits with a diff first
   /model [name]      list models or switch the active model
   /thinking [level]  list thinking levels or set reasoning effort
+  /theme [auto|dark|light]  switch the color palette
   /compact           summarize the conversation to free context
   /context           show context usage
   /undo              restore files changed by the previous turn
@@ -641,6 +679,7 @@ Keys
   Enter              send the message
   Tab                cycle the operating mode (General, Planner, Builder,
                     Debugger, Cybersecurity, Simplifier)
+  Shift+Tab          cycle the thinking level (off, low, medium, high, xhigh)
   Alt+Enter / Ctrl+J insert a newline
   Ctrl+P / Ctrl+N    previous / next input in history
   PgUp / PgDn        scroll the transcript (mouse wheel works too)
