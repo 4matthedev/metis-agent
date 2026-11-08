@@ -46,7 +46,9 @@ metis-agent/
 ├── internal/
 │   ├── agent/                  # The agent loop (see §4)
 │   │   ├── agent.go            # Agent, Run(), event emission, history ops
-│   │   └── agent_test.go       # fake model tests
+│   │   ├── modes.go            # Mode prompts + policyForMode (Planner gate)
+│   │   ├── agent_test.go       # fake model tests
+│   │   └── modes_test.go       # posture/policy tests
 │   ├── config/                 # JSON config + env + platform paths
 │   │   ├── config.go           # Values, File, Defaults(), ApplyEnv(), Validate()
 │   │   └── config_test.go
@@ -68,7 +70,8 @@ metis-agent/
 │   │   ├── manager.go          # Manager: List/Get/Command/RunCommand, search paths
 │   │   └── manager_test.go
 │   ├── session/                # Per-project session persistence
-│   │   └── session.go          # Session, Store, atomic Save()
+│   │   ├── session.go          # Session, Store, atomic Save()
+│   │   └── session_test.go
 │   ├── tools/                  # Tool registry + 33 built-in tools + approval
 │   │   ├── registry.go         # Registry, Execute(), approval gating
 │   │   ├── approval.go         # needApproval(), ApprovalDecision/Approver, insideProject()
@@ -85,14 +88,26 @@ metis-agent/
 │   │   ├── web.go              # http_fetch, download_file (+ SSRF guards)
 │   │   ├── shell.go            # shell tool: exec, process group kill, output cap, ANSI
 │   │   ├── proc_unix.go / proc_other.go   # process-group kill (platform-specific)
-│   │   └── tool_test.go
+│   │   ├── tool_test.go
+│   │   └── security_test.go    # path escapes, policy bypass, approval tests
 │   └── tui/                    # Bubble Tea UI
-│       ├── tui.go              # Model, Run(), input, approval, slash menu, viewport
+│       ├── tui.go              # Model, Update loop, key handling
+│       ├── commands.go         # slash commands + completion menu
+│       ├── sessions.go         # /session, /sessions, resume & naming
+│       ├── approvals.go        # approval prompts and decisions
+│       ├── view.go             # layout, transcript, header/status/input
 │       ├── styles.go           # palette, transcript rendering
 │       ├── highlight.go        # chroma-based syntax highlighting
 │       ├── markdown.go         # glamour-based Markdown rendering
 │       ├── diff.go             # unified diff rendering
 │       └── tui_test.go
+├── scripts/
+│   └── install.sh              # curl installer (easy/advanced backends)
+├── .github/workflows/
+│   ├── ci.yml                  # fmt, vet, build, race, cross-builds
+│   └── release.yml             # tag -> release tarballs + SHA256SUMS
+├── Makefile                    # make check / race / cover
+└── LICENSE                     # MIT
 ```
 
 ### Dependency graph (who calls whom)
@@ -570,3 +585,49 @@ that blocks legitimate workflows; do not remove the approval gate either.**
 | How are skills discovered/used? | `internal/skills/skill.go` + `manager.go` + `main.go` |
 | What tools exist + their schemas? | `internal/tools/*.go` (`registry.go` order) |
 | How to build/test? | §12 (How to make a change, verification) |
+| How does the curl installer work? | §15 + `scripts/install.sh` |
+
+---
+
+## 15. Installer & releases (`scripts/install.sh`, `release.yml`)
+
+The installer is the supported path for end users. It has two modes:
+
+- **easy** (default): installs Ollama, pulls `gemma4:e2b`, writes the global
+  config, installs the launcher.
+- **advanced**: picks Ollama / llama.cpp / LM Studio, reuses an installed model,
+  and offers `gemma4:e2b` only when the backend has none.
+
+Layout it creates:
+
+| Path | Purpose |
+|---|---|
+| `$XDG_DATA_HOME/metis-agent/bin/metis-agent` (default `~/.local/share/...`) | real binary |
+| `$PREFIX/bin/metis-agent` (default `~/.local/bin/...`) | generated launcher; starts the backend on demand |
+| `$PREFIX/bin/Metis-Agent` | capitalized alias (case-sensitive filesystems) |
+| `$XDG_CONFIG_HOME/metis-agent/config.json` | global config |
+| `$XDG_DATA_HOME/metis-agent/backend.log` | backend stdout/stderr |
+
+**Release asset naming is a contract.** `scripts/install.sh` downloads:
+
+```
+/releases/latest/download/metis-agent_<os>_<arch>.tar.gz
+/releases/latest/download/SHA256SUMS
+/releases/download/v<version>/metis-agent_<version>_<os>_<arch>.tar.gz
+```
+
+Each tarball contains a single `metis-agent` (or `metis-agent.exe` on Windows)
+at its root. `release.yml` publishes both the versioned and stable names and a
+`SHA256SUMS` covering both. If you rename assets, update the installer in the
+same commit. When no release exists the installer falls back to `git clone` +
+`go build`.
+
+The generated launcher embeds the backend choice at install time, so changing
+`config.json` by hand does not change which process the launcher starts. The
+launcher runs the binary in the **current** directory (not `$HOME`); that is
+intentional for a coding agent. `--help`/`--version` bypass backend startup.
+
+Prompting reads from `/dev/tty` (fd 3), so `curl | bash` stays interactive;
+without a TTY (CI, containers) the installer takes the documented defaults and
+`--yes` semantics.
+

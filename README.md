@@ -41,9 +41,50 @@ metis  Fixed `add` (it was subtracting) and both tests pass.
  enter send  ·  alt+enter newline  ·  ctrl+o tools  ·  /help  ·  ctrl+c quit
 ```
 
+## Install
+
+One line gets a working local setup. **Easy mode** installs Ollama, pulls
+`gemma4:e2b`, installs Metis, and configures everything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts/install.sh | bash
+```
+
+**Advanced mode** lets you choose Ollama, llama.cpp, or LM Studio. It reuses a
+model you already have and only downloads `gemma4:e2b` when none is found:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts/install.sh | bash -s -- --advanced
+```
+
+Useful flags: `--backend ollama|llamacpp|lmstudio|none`, `--model NAME`,
+`--no-model`, `--prefix DIR`, `--version TAG`, `--yes`, `--dry-run`.
+`scripts/install.sh --help` lists them all.
+
+The installer writes:
+
+| Path | Purpose |
+|---|---|
+| `~/.local/share/metis-agent/bin/metis-agent` | the binary |
+| `~/.local/bin/metis-agent` (and `Metis-Agent`) | launcher that starts the backend on demand |
+| `~/.config/metis-agent/config.json` | provider, endpoint, and model |
+| `~/.local/share/metis-agent/backend.log` | backend logs |
+
+It also adds `~/.local/bin` to `PATH` in your shell rc file on first run, so
+`metis-agent` works from any directory — including your home folder. Re-running
+the installer upgrades the binary and backs up an existing config first.
+
+To uninstall, remove those paths and the `# Added by metis-agent installer`
+block from your shell rc:
+
+```sh
+rm -rf ~/.local/share/metis-agent ~/.config/metis-agent \
+       ~/.local/bin/metis-agent ~/.local/bin/Metis-Agent
+```
+
 ## Requirements
 
-- Go 1.24+
+- Go 1.24+ (only when building from source; the installer downloads a release)
 - A running OpenAI-compatible model server with streaming tool/function calling:
   - llama-prism (`http://127.0.0.1:9931`), LM Studio (`:1234`), or Ollama (`:11434`)
   - or a hosted provider such as OpenAI, OpenRouter, Groq, or Together
