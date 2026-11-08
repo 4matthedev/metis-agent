@@ -207,6 +207,18 @@ a starter file. Environment variables use the `METIS_` prefix, for example
 `METIS_PROVIDER`, `METIS_MODEL`, `METIS_AUTO_APPROVE`, and
 `METIS_SHELL_TIMEOUT_SEC`. See `internal/config/config.go` for the full set.
 
+The project config is `./.metis-agent.json` (the global file is
+`$XDG_CONFIG_HOME/metis-agent/config.json`, or the platform equivalent).
+Copy `.metis-agent.example.json` as a starting point:
+
+```sh
+cp .metis-agent.example.json .metis-agent.json
+```
+
+It can contain `api_key` and MCP `auth_token` values, so it is git-ignored by
+default — commit only the example, never real credentials. MCP servers go in
+its `mcp_servers` array (or the `METIS_MCP_SERVERS` environment variable).
+
 ## Tools
 
 | Tool | Args | What it does |

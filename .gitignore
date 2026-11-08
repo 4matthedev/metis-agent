@@ -13,7 +13,6 @@ coverage.*
 
 # Agent/tool metadata and generated analysis
 .siso/
-.metis-agent/
 
 # Secrets and local config — never commit these
 .env
@@ -28,10 +27,12 @@ credentials
 credentials.json
 secrets.*
 *.token
-metis-agent.json
-config.local.json
-.mcp.json
-mcp.json
+*.local.json
+
+# Project config (./.metis-agent.json) can hold api_key and MCP auth_token.
+# Only the committed example is versioned; force-add yours if it is secret-free:
+#   git add -f .metis-agent.json
+/.metis-agent.json
 
 # Sessions and logs
 *.log

@@ -1,0 +1,32 @@
+{
+  "provider": "auto",
+  "base_url": "",
+  "model": "",
+  "temperature": 0.3,
+  "max_steps": 40,
+  "window": 64,
+  "shell": true,
+  "shell_timeout_sec": 120,
+  "session": true,
+  "highlight": "auto",
+  "auto_approve": false,
+  "mcp_servers": [
+    {
+      "name": "github",
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "set-this-in-your-shell-not-in-git"
+      }
+    },
+    {
+      "name": "example-http",
+      "type": "http",
+      "transport": "streamable",
+      "url": "https://mcp.example.com/mcp",
+      "auth_type": "bearer",
+      "auth_token": "set-this-in-your-shell-not-in-git"
+    }
+  ]
+}
