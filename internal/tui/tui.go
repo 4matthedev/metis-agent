@@ -45,6 +45,15 @@ type Options struct {
 	MCPManager *mcp.Manager
 	// SkillsManager manages the skill system at runtime (/skills command).
 	SkillsManager *skills.Manager
+	// Undo restores the last checkpoint (/undo).
+	Undo func() (string, error)
+	// Commit stages changes and creates a commit, optionally generating the
+	// message when the argument is empty (/commit).
+	Commit func(ctx context.Context, message string) (string, error)
+	// ListModels, SetModel, and ModelName power runtime model switching.
+	ListModels func(ctx context.Context) ([]string, error)
+	SetModel   func(string) error
+	ModelName  func() string
 }
 
 // modes is the ordered list of operating modes the user can switch between
@@ -109,6 +118,16 @@ type runDoneMsg struct {
 	answer  string
 	err     error
 	elapsed time.Duration
+}
+
+type compactDoneMsg struct {
+	summary string
+	err     error
+}
+
+type commitDoneMsg struct {
+	output string
+	err    error
 }
 
 // Model is the Bubble Tea model for the Metis TUI.
@@ -285,6 +304,38 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.handleEvent(agent.Event(msg))
 		return m, nil
+
+	case compactDoneMsg:
+		m.running = false
+		m.cancel = nil
+		m.terminal = true
+		m.runDone = true
+		m.status = "ready"
+		if msg.err != nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "compact: " + msg.err.Error()})
+		} else {
+			m.blocks = append(m.blocks, block{
+				kind: blockSystem,
+				text: "conversation compacted into a summary\n\n" + msg.summary,
+			})
+			m.saveSession()
+		}
+		m.syncViewport(true)
+		return m, m.input.Focus()
+
+	case commitDoneMsg:
+		m.running = false
+		m.cancel = nil
+		m.terminal = true
+		m.runDone = true
+		m.status = "ready"
+		if msg.err != nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "commit: " + msg.err.Error()})
+		} else {
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: msg.output})
+		}
+		m.syncViewport(true)
+		return m, m.input.Focus()
 
 	case runDoneMsg:
 		m.pendingApproval = nil

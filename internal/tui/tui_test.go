@@ -80,7 +80,7 @@ func TestFormatToolArgs(t *testing.T) {
 // rewrites the input to the chosen command.
 func TestSlashMenuListsAllCommands(t *testing.T) {
 	m := testModel()
-	m.width, m.height = 100, 30
+	m.width, m.height = 100, 40
 	m.input.SetValue("/")
 	m.suggestDismissed = false
 

@@ -74,6 +74,14 @@ func formatApprovalRequest(req tools.ApprovalRequest) string {
 	if req.Reason != "" {
 		fmt.Fprintf(&b, "  %s\n", req.Reason)
 	}
+	if req.Preview != "" {
+		b.WriteString("\n")
+		for _, line := range strings.Split(strings.TrimRight(req.Preview, "\n"), "\n") {
+			b.WriteString("  ")
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
 	fmt.Fprintf(&b, "  y allow once   a always allow %s   A auto-approve all   n deny", req.Tool)
 	return b.String()
 }

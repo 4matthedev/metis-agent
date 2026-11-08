@@ -150,7 +150,7 @@ func (m *Model) headerView() string {
 	width := max(10, m.width)
 	brand := styleBrand.Render("▌ metis") + styleDim.Render("  coding agent")
 	server := strings.TrimPrefix(strings.TrimPrefix(m.opts.Server, "https://"), "http://")
-	rightText := oneLine(clean(m.opts.Model + " · " + server))
+	rightText := oneLine(clean(m.currentModel() + " · " + server))
 	right := styleHeaderSub.Render(truncate(rightText, max(5, width-lipgloss.Width(brand)-2)))
 	top := joinLR(brand, right, width)
 	rule := styleRule.Render(strings.Repeat("─", width))
@@ -166,8 +166,8 @@ func (m *Model) statusView() string {
 	case m.running:
 		left = m.spinner.View() + " " + styleStatusOn.Render(m.status)
 		modeLabel := modes[m.modeIdx].label
-		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  esc cancel",
-			m.step, fmtDuration(time.Since(m.started)), modeLabel))
+		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  %s  ·  esc cancel",
+			m.step, fmtDuration(time.Since(m.started)), modeLabel, m.contextMeter()))
 	case m.err != "":
 		msg := oneLine(clean(m.err))
 		left = styleError.Render("● error") + "  " +
@@ -184,9 +184,10 @@ func (m *Model) statusView() string {
 			if m.step == 1 {
 				steps = "step"
 			}
-			right = styleDim.Render(fmt.Sprintf("%d %s  ·  %s  ·  tab mode", m.step, steps, fmtDuration(m.elapsed)))
+			right = styleDim.Render(fmt.Sprintf("%d %s  ·  %s  ·  %s  ·  tab mode",
+				m.step, steps, fmtDuration(m.elapsed), m.contextMeter()))
 		} else {
-			right = styleDim.Render("tab mode · esc cancel")
+			right = styleDim.Render(m.contextMeter() + "  ·  tab mode · esc cancel")
 		}
 	}
 	return " " + joinLR(left, right, max(10, m.width-2)) + " "
@@ -213,6 +214,15 @@ func (m *Model) footerView() string {
 		hint = "enter send · /help"
 	}
 	return " " + styleFooter.Render(truncate(hint, max(1, m.width-2)))
+}
+
+// contextMeter renders message usage against the configured window.
+func (m *Model) contextMeter() string {
+	msgs, _, window := m.agent.ContextInfo()
+	if window <= 0 {
+		return fmt.Sprintf("ctx %d", msgs)
+	}
+	return fmt.Sprintf("ctx %d/%d", msgs, window)
 }
 
 func joinLR(left, right string, width int) string {

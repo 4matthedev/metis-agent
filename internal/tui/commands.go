@@ -34,6 +34,12 @@ var slashCommands = []slashCommand{
 	{"/new", "", "start a fresh session"},
 	{"/resume", "[id]", "resume the latest (or named) session"},
 	{"/autoapprove", "[on|off]", "toggle or set automatic approval"},
+	{"/approve-edits", "[on|off]", "review file edits with a diff before writing"},
+	{"/model", "[name]", "list models or switch the active model"},
+	{"/compact", "", "summarize the conversation to free context"},
+	{"/context", "", "show context usage"},
+	{"/undo", "", "restore files changed by the previous turn"},
+	{"/commit", "[message]", "stage everything and commit (generates a message)"},
 	{"/mcp", "[list|add|remove|reconnect]", "manage MCP servers"},
 	{"/mode", "[name]", "switch operating mode (general/planner/builder/debugger/cybersecurity/simplifier); press Tab to cycle"},
 	{"/skills", "[list|info|use|run]", "manage the skill system"},
@@ -59,6 +65,14 @@ func parseModeName(name string) int {
 	default:
 		return -1
 	}
+}
+
+// currentModel returns the live model name, falling back to the initial value.
+func (m *Model) currentModel() string {
+	if m.opts.ModelName != nil {
+		return m.opts.ModelName()
+	}
+	return m.opts.Model
 }
 
 func isExactCommand(text string) bool {
@@ -285,7 +299,7 @@ func (m *Model) command(text string) tea.Cmd {
 			output = "expanded"
 		}
 		text := fmt.Sprintf("provider  %s\nmodel     %s\nserver    %s\nproject   %s\napproval  %s\ntools     %d\noutput    %s",
-			m.opts.Provider, m.opts.Model, m.opts.Server, m.opts.Dir, approval, len(m.opts.Tools), output)
+			m.opts.Provider, m.currentModel(), m.opts.Server, m.opts.Dir, approval, len(m.opts.Tools), output)
 		m.blocks = append(m.blocks, block{kind: blockSystem, text: text})
 		m.input.Reset()
 		m.layout()
@@ -340,6 +354,145 @@ func (m *Model) command(text string) tea.Cmd {
 		m.input.Reset()
 		m.layout()
 		m.syncViewport(false)
+	case "/approve-edits", "/review-edits":
+		state := true
+		if len(fields) > 1 {
+			switch strings.ToLower(fields[1]) {
+			case "on", "yes", "true":
+				state = true
+			case "off", "no", "false":
+				state = false
+			default:
+				m.blocks = append(m.blocks, block{kind: blockError, text: "usage: /approve-edits [on|off]"})
+				m.input.Reset()
+				m.layout()
+				m.syncViewport(false)
+				return nil
+			}
+		}
+		m.agent.SetApproveEdits(state)
+		label := "off"
+		if state {
+			label = "on"
+		}
+		m.blocks = append(m.blocks, block{kind: blockSystem, text: "edit review " + label})
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+	case "/model":
+		if len(fields) > 1 {
+			name := strings.TrimSpace(fields[1])
+			if m.opts.SetModel == nil {
+				m.blocks = append(m.blocks, block{kind: blockError, text: "model switching is not available"})
+			} else if err := m.opts.SetModel(name); err != nil {
+				m.blocks = append(m.blocks, block{kind: blockError, text: "model: " + err.Error()})
+			} else {
+				m.opts.Model = name
+				m.blocks = append(m.blocks, block{kind: blockSystem, text: "model: " + name})
+			}
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
+		}
+		if m.opts.ListModels == nil {
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: "current model: " + m.currentModel()})
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		models, err := m.opts.ListModels(ctx)
+		cancel()
+		if err != nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "models: " + err.Error()})
+		} else {
+			var b strings.Builder
+			fmt.Fprintf(&b, "current model: %s\n", m.currentModel())
+			for _, name := range models {
+				mark := "  "
+				if name == m.currentModel() {
+					mark = "* "
+				}
+				b.WriteString(mark + name + "\n")
+			}
+			b.WriteString("\nswitch with /model <name>")
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: b.String()})
+		}
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+	case "/compact":
+		if m.running {
+			return nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancel = cancel
+		m.running = true
+		m.terminal = false
+		m.runDone = false
+		m.started = time.Now()
+		m.status = "compacting"
+		m.err = ""
+		m.input.Reset()
+		m.input.SetHeight(1)
+		m.input.Blur()
+		m.layout()
+		m.syncViewport(true)
+		ag := m.agent
+		return tea.Batch(m.spinner.Tick, func() tea.Msg {
+			summary, err := ag.Compact(ctx)
+			return compactDoneMsg{summary: summary, err: err}
+		})
+	case "/context":
+		msgs, tokens, window := m.agent.ContextInfo()
+		text := fmt.Sprintf("messages  %d (window %d)\napprox    ~%d tokens", msgs, window, tokens)
+		m.blocks = append(m.blocks, block{kind: blockSystem, text: text + "\n\nuse /compact to summarize the conversation"})
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+	case "/undo":
+		if m.opts.Undo == nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "undo is not available"})
+		} else if out, err := m.opts.Undo(); err != nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "undo: " + err.Error()})
+		} else {
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: out})
+		}
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+	case "/commit":
+		if m.running {
+			return nil
+		}
+		if m.opts.Commit == nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "commit is not available"})
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
+		}
+		message := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), cmd))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancel = cancel
+		m.running = true
+		m.terminal = false
+		m.runDone = false
+		m.started = time.Now()
+		m.status = "committing"
+		m.err = ""
+		m.input.Reset()
+		m.input.SetHeight(1)
+		m.input.Blur()
+		m.layout()
+		m.syncViewport(true)
+		commit := m.opts.Commit
+		return tea.Batch(m.spinner.Tick, func() tea.Msg {
+			out, err := commit(ctx, message)
+			return commitDoneMsg{output: out, err: err}
+		})
 	case "/session":
 		m.blocks = append(m.blocks, block{kind: blockSystem, text: m.sessionInfo()})
 		m.input.Reset()
@@ -428,6 +581,12 @@ const helpText = `Commands
   /new               start a fresh session
   /resume [id]       resume the latest (or named) session
   /autoapprove [on|off] toggle or set automatic approval
+  /approve-edits [on|off] review file edits with a diff first
+  /model [name]      list models or switch the active model
+  /compact           summarize the conversation to free context
+  /context           show context usage
+  /undo              restore files changed by the previous turn
+  /commit [message]  stage everything and commit (generates a message)
   /mcp [subcommand]  list/add/remove/reconnect MCP servers
   /skills [subcommand]  list/info/use/run skills
   /mode [name]       switch operating mode (or press Tab to cycle)

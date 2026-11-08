@@ -43,7 +43,7 @@ func (m *Model) saveSession() {
 		return
 	}
 	m.sess.Provider = m.opts.Provider
-	m.sess.Model = m.opts.Model
+	m.sess.Model = m.currentModel()
 	m.sess.WorkDir = m.opts.Dir
 	m.sess.Messages = m.agent.ExportHistory()
 	if err := m.store.Save(m.sess); err != nil {

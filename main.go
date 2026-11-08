@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -16,14 +17,21 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"metis-agent/internal/agent"
+	"metis-agent/internal/checkpoint"
 	"metis-agent/internal/config"
+	"metis-agent/internal/doctor"
+	"metis-agent/internal/instructions"
 	"metis-agent/internal/llm"
 	"metis-agent/internal/mcp"
 	"metis-agent/internal/session"
 	"metis-agent/internal/skills"
 	"metis-agent/internal/tools"
 	"metis-agent/internal/tui"
+	"metis-agent/internal/update"
 )
+
+// version is set at build time with -ldflags "-X main.version=<tag>".
+var version = "dev"
 
 const baseSystemPrompt = `You are Metis, a coding agent working inside a project directory. You complete
 tasks by using tools, not by guessing.
@@ -53,7 +61,11 @@ Tools:
 - git_show: show a commit, tag, or object
 - git_blame: line-by-line authorship for a file
 - http_fetch: make HTTP(S) requests to read docs, APIs, or submit data
+- web_search: search the public web for current information
 - download_file: download a URL to a file
+- repo_map: compact outline of functions, types, and classes in the repository
+- diagnostics: run the project's build, type-check, and lint commands
+- subagent: delegate an independent read-only investigation to a fresh agent
 - system_info: OS, architecture, CPU count, user, temp path, and time
 - env_get: read environment variables (secrets redacted by default)
 - which: locate executables on PATH
@@ -70,7 +82,7 @@ Skills:
 - run executes a skill's declared run command. It is approval-gated exactly like shell — the user confirms each run. Do not bypass approval by shelling out to the command directly if a skill's run action is available.
 
 Workflow:
-1. Explore before editing. Start with project_info on unfamiliar repositories, then use list_dir, glob, search, and file_read.
+1. Explore before editing. Start with project_info on unfamiliar repositories, then use repo_map, list_dir, glob, search, and file_read.
 2. For multi-step work, write a todo list with todo_write and update it as you go.
 3. Make the smallest correct change with file_edit or multi_edit; use file_write for new files. Use replace_in_files for mechanical refactors, previewing with dry_run when the change is broad.
 4. Use make_dir, file_move, file_copy, file_delete, and diff_files for filesystem work instead of shell commands when possible.
@@ -111,6 +123,13 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --auto-approve, -y  run dangerous tool calls without asking
                       (default: ask before shell, deletes, outside-project access,
                       bulk edits, downloads, and non-GET HTTP)
+  --approve-edits     review in-project file edits with a diff before writing
+  --redact-secrets    redact credentials in tool output (default: on)
+  --no-redact         disable credential redaction
+  --verify CMD        run CMD automatically after a turn changes files
+  --verify-timeout N  auto-verify timeout in seconds (default: 120)
+  --fallback-models L comma-separated fallback models
+  --instructions L    comma-separated extra instruction files
   --highlight MODE    syntax highlighting: auto, dark, light, off
   --config PATH       load this config file instead of the standard ones
   --no-config         ignore config files (environment and flags still apply)
@@ -120,7 +139,13 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --resume            resume the latest session for this directory
   --no-session        disable session persistence
   --plain             disable the TUI and use the line REPL
+  --json              stream NDJSON events on stdout (for editors)
   --once TASK         single-shot task
+  --doctor            diagnose the installation and model backend
+  --update            download and install the latest release
+  --check-update      report whether a newer release exists
+  --undo              restore files changed by the previous turn
+  --version           print the version and exit
   -h, --help          show this help
 examples:
   metis-agent                        # full-screen TUI, auto-detected provider
@@ -158,11 +183,56 @@ func main() {
 	noSession := flag.Bool("no-session", false, "disable session persistence")
 	plain := flag.Bool("plain", false, "disable the TUI and use the line REPL")
 	once := flag.String("once", "", "single-shot task")
+	jsonMode := flag.Bool("json", false, "stream NDJSON events on stdout (implies --plain)")
+	undoFlag := flag.Bool("undo", false, "restore files changed by the previous turn and exit")
+	doctorFlag := flag.Bool("doctor", false, "diagnose the installation and model backend")
+	updateFlag := flag.Bool("update", false, "download and install the latest release")
+	checkUpdate := flag.Bool("check-update", false, "report whether a newer release exists")
+	versionFlag := flag.Bool("version", false, "print the version and exit")
+	redactSecrets := flag.Bool("redact-secrets", true, "redact credentials in tool output")
+	noRedact := flag.Bool("no-redact", false, "do not redact credentials in tool output")
+	verifyCmd := flag.String("verify", "", "command to run automatically after a turn changes files")
+	verifyTimeout := flag.Int("verify-timeout", 0, "auto-verify timeout in seconds")
+	fallbackModels := flag.String("fallback-models", "", "comma-separated fallback models")
+	instructionsFlag := flag.String("instructions", "", "comma-separated extra instruction files")
+	approveEdits := flag.Bool("approve-edits", false, "review in-project file edits with a diff before writing")
 	flag.Usage = func() { fmt.Fprint(os.Stderr, helpText) }
 	flag.Parse()
 
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if *versionFlag {
+		fmt.Printf("metis-agent %s\n", version)
+		return
+	}
+	if *updateFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		res, err := update.Update(ctx, version, os.Stdout)
+		if err != nil {
+			fatal(err)
+		}
+		if res.From == res.To {
+			fmt.Printf("already up to date (%s)\n", version)
+		}
+		return
+	}
+	if *checkUpdate {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		rel, err := update.Latest(ctx)
+		if err != nil {
+			fatal(err)
+		}
+		if update.IsNewer(version, rel.TagName) {
+			fmt.Printf("update available: %s -> %s\n", version, rel.TagName)
+			fmt.Println("run: metis-agent --update")
+		} else {
+			fmt.Printf("up to date (%s)\n", version)
+		}
+		return
+	}
 
 	if *initConfig {
 		path := *configPath
@@ -243,6 +313,24 @@ func main() {
 	if set["highlight"] {
 		v.Highlight = strings.ToLower(*highlight)
 	}
+	if set["verify"] {
+		v.Verify = strings.TrimSpace(*verifyCmd)
+	}
+	if set["verify-timeout"] {
+		v.VerifyTimeoutSec = *verifyTimeout
+	}
+	if set["fallback-models"] {
+		v.FallbackModels = splitCSV(*fallbackModels)
+	}
+	if set["instructions"] {
+		v.Instructions = splitCSV(*instructionsFlag)
+	}
+	if set["redact-secrets"] {
+		v.RedactSecrets = *redactSecrets
+	}
+	if *noRedact {
+		v.RedactSecrets = false
+	}
 	if *noShell {
 		v.Shell = false
 	}
@@ -251,6 +339,51 @@ func main() {
 	}
 	if err := v.Validate(); err != nil {
 		fatal(err)
+	}
+
+	if *undoFlag {
+		cp, err := checkpoint.New(*dir)
+		if err != nil {
+			fatal(err)
+		}
+		res, err := cp.Undo()
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("restored %d path(s) from %s\n", res.Restored, filepath.Base(res.Directory))
+		for _, s := range res.Skipped {
+			fmt.Fprintf(os.Stderr, "warning: not restored: %s\n", s)
+		}
+		return
+	}
+
+	if *doctorFlag {
+		probe := tools.NewRegistryWithOptions(tools.Options{
+			WorkDir:     *dir,
+			EnableShell: v.Shell,
+			AutoApprove: v.AutoApprove,
+		})
+		checks := doctor.Run(context.Background(), doctor.Options{
+			Version:   version,
+			Dir:       *dir,
+			Values:    v,
+			ToolCount: len(probe.List()) + 1,
+		})
+		failed := 0
+		for _, c := range checks {
+			mark := "✓"
+			if !c.OK {
+				mark = "✗"
+				failed++
+			}
+			fmt.Printf("%s %-18s %s\n", mark, c.Name, c.Detail)
+		}
+		if failed > 0 {
+			fmt.Printf("\n%d check(s) need attention\n", failed)
+			os.Exit(1)
+		}
+		fmt.Println("\ninstallation looks healthy")
+		return
 	}
 
 	if *listModels {
@@ -275,13 +408,8 @@ func main() {
 		fatal(err)
 	}
 
-	client, err := llm.NewClientWithOptions(llm.ClientOptions{
-		Provider: resolved.Provider,
-		BaseURL:  resolved.BaseURL,
-		Model:    resolved.Model,
-		APIKey:   resolved.APIKey,
-		Temp:     v.Temperature,
-	})
+	router, err := llm.NewRouter(resolved.Provider, resolved.BaseURL, resolved.APIKey,
+		resolved.Model, v.Temperature, v.FallbackModels)
 	if err != nil {
 		fatal(err)
 	}
@@ -292,6 +420,21 @@ func main() {
 		ShellTimeout: time.Duration(v.ShellTimeoutSec) * time.Second,
 		AutoApprove:  v.AutoApprove,
 	})
+	registry.SetRedactSecrets(v.RedactSecrets)
+	registry.SetApproveEdits(*approveEdits)
+	cp, cpErr := checkpoint.New(*dir)
+	if cpErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: undo checkpoints are disabled: %v\n", cpErr)
+		cp = nil
+	}
+	if cp != nil {
+		registry.AddMutationHook(func(_ string, _ map[string]any, paths []string) {
+			for _, p := range paths {
+				cp.Snapshot(p)
+			}
+		})
+	}
+	registerSubagentTool(registry, router, *dir)
 	// MCP servers: load the ones already configured, and keep a live manager so
 	// the user can add/remove/reconnect them from the /mcp command.
 	mcpPath := config.ProjectPath(*dir)
@@ -314,8 +457,9 @@ func main() {
 	for _, t := range registry.List() {
 		toolNames = append(toolNames, t.Name)
 	}
+	docs := instructions.Load(*dir, v.Instructions)
 	cfg := agent.Config{
-		LLM:      client,
+		LLM:      router,
 		Registry: registry,
 		System:   baseSystemPrompt,
 		MaxSteps: v.MaxSteps,
@@ -325,9 +469,22 @@ func main() {
 	if *system != "" {
 		cfg.System = *system
 	}
+	if prompt := instructions.Prompt(docs); prompt != "" {
+		cfg.System += prompt
+	}
 	if !v.Shell {
 		cfg.System += "\n\nSession note: the shell tool is disabled. Do not call it; " +
 			"use the file tools only and clearly explain anything you cannot run or verify."
+	}
+	if v.Verify != "" {
+		timeout := time.Duration(v.VerifyTimeoutSec) * time.Second
+		cfg.Verify = func(ctx context.Context) (string, error) {
+			return runVerifyCommand(ctx, v.Verify, *dir, timeout)
+		}
+	}
+	if cp != nil {
+		cfg.BeginTurn = func() { _ = cp.Begin("turn") }
+		cfg.EndTurn = func() { _ = cp.End() }
 	}
 	a := agent.New(cfg)
 
@@ -362,7 +519,11 @@ func main() {
 
 	// Single-shot mode never uses the TUI.
 	if *once != "" {
-		a.SetEventSink(plainSink())
+		if *jsonMode {
+			a.SetEventSink(jsonSink())
+		} else {
+			a.SetEventSink(plainSink())
+		}
 		if isatty.IsTerminal(os.Stdin.Fd()) {
 			a.SetApprover(stdinApprover(bufio.NewReader(os.Stdin)))
 		} else if !v.AutoApprove {
@@ -376,14 +537,14 @@ func main() {
 			os.Exit(1)
 		}
 		if store != nil && sess != nil {
-			if err := saveSession(store, sess, a, resolved.Provider, resolved.Model, *dir); err != nil {
+			if err := saveSession(store, sess, a, resolved.Provider, router.Model(), *dir); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
 			}
 		}
 		return
 	}
 
-	useTUI := !*plain && isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
+	useTUI := !*plain && !*jsonMode && isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 	if useTUI {
 		tui.SetTheme(v.Highlight)
 		opts := tui.Options{
@@ -399,6 +560,19 @@ func main() {
 			Session:         sess,
 			MCPManager:      mgr,
 			SkillsManager:   skillsM,
+			Undo:            undoFunc(cp),
+			Commit:          commitFunc(router, *dir),
+			ListModels:      listModelNames(router),
+			SetModel: func(name string) error {
+				if err := router.SetModel(name); err != nil {
+					return err
+				}
+				if sess != nil {
+					sess.Model = name
+				}
+				return nil
+			},
+			ModelName: router.Model,
 		}
 		if sess != nil && store != nil {
 			opts.SessionID = sess.ID
@@ -424,6 +598,10 @@ func main() {
 		Session:  sess,
 		MCP:      mgr,
 		Skills:   skillsM,
+		Router:   router,
+		Undo:     undoFunc(cp),
+		Commit:   commitFunc(router, *dir),
+		JSON:     *jsonMode,
 	})
 }
 
@@ -558,6 +736,10 @@ type replOptions struct {
 	Session  *session.Session
 	MCP      *mcp.Manager
 	Skills   *skills.Manager
+	Router   *llm.Router
+	Undo     func() (string, error)
+	Commit   func(ctx context.Context, message string) (string, error)
+	JSON     bool
 }
 
 const replCommandHelp = `Commands
@@ -567,6 +749,12 @@ const replCommandHelp = `Commands
   /tools             list the available tools
   /mode [name]       show or switch operating mode (general, planner, builder, debugger, cybersecurity, simplifier)
   /autoapprove [on|off] toggle or set automatic approval
+  /approve-edits [on|off] review file edits with a diff first
+  /model [name]      list models or switch the active model
+  /compact           summarize the conversation to free context
+  /context           show context usage
+  /undo              restore files changed by the previous turn
+  /commit [message]  stage everything and commit (generates a message)
   /mcp [subcommand]  manage MCP servers (list/add/remove/reconnect)
   /skills [subcommand]  manage the skill system (list/info/use/run)
   /quit              leave Metis
@@ -615,7 +803,11 @@ func stdinApprover(r *bufio.Reader) tools.Approver {
 // runREPL is the line-based fallback used with --plain or when stdin/stdout
 // is not a terminal.
 func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
-	a.SetEventSink(plainSink())
+	if opts.JSON {
+		a.SetEventSink(jsonSink())
+	} else {
+		a.SetEventSink(plainSink())
+	}
 	fmt.Fprintf(os.Stderr, "Metis ready. provider %s · model %s · %s\n",
 		opts.Provider, opts.Model, opts.Server)
 	if opts.Session != nil {
@@ -645,6 +837,12 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 		if line == "" {
 			continue
 		}
+		currentModel := func() string {
+			if opts.Router != nil {
+				return opts.Router.Model()
+			}
+			return opts.Model
+		}
 		if strings.HasPrefix(line, "/") {
 			switch strings.Fields(line)[0] {
 			case "/quit", "/exit", "/q":
@@ -653,7 +851,7 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 				a.Reset()
 				if opts.Store != nil && opts.Session != nil {
 					opts.Session.Messages = nil
-					_ = saveSession(opts.Store, opts.Session, a, opts.Provider, opts.Model, opts.Dir)
+					_ = saveSession(opts.Store, opts.Session, a, opts.Provider, currentModel(), opts.Dir)
 				}
 				fmt.Fprintln(os.Stderr, "conversation reset")
 				continue
@@ -677,13 +875,116 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 					fmt.Fprintln(os.Stderr, "auto-approve disabled; dangerous tools require confirmation")
 				}
 				continue
+			case "/approve-edits", "/review-edits":
+				state := true
+				fields := strings.Fields(line)
+				if len(fields) > 1 {
+					switch strings.ToLower(fields[1]) {
+					case "on", "yes", "true":
+						state = true
+					case "off", "no", "false":
+						state = false
+					default:
+						fmt.Fprintln(os.Stderr, "usage: /approve-edits [on|off]")
+						continue
+					}
+				}
+				a.SetApproveEdits(state)
+				if state {
+					fmt.Fprintln(os.Stderr, "edit review enabled: file edits ask for approval with a diff")
+				} else {
+					fmt.Fprintln(os.Stderr, "edit review disabled")
+				}
+				continue
+			case "/model":
+				fields := strings.Fields(line)
+				if len(fields) > 1 {
+					if opts.Router == nil {
+						fmt.Fprintln(os.Stderr, "model switching is not available")
+						continue
+					}
+					if err := opts.Router.SetModel(fields[1]); err != nil {
+						fmt.Fprintf(os.Stderr, "model: %v\n", err)
+						continue
+					}
+					opts.Model = fields[1]
+					if opts.Session != nil {
+						opts.Session.Model = fields[1]
+					}
+					fmt.Fprintf(os.Stderr, "model: %s\n", currentModel())
+					continue
+				}
+				if opts.Router == nil {
+					fmt.Fprintf(os.Stderr, "current model: %s\n", currentModel())
+					continue
+				}
+				listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				models, err := opts.Router.ListModels(listCtx)
+				cancel()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "models: %v\n", err)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "current model: %s\n", currentModel())
+				for _, m := range models {
+					mark := "  "
+					if m.ID == currentModel() {
+						mark = "* "
+					}
+					fmt.Fprintf(os.Stderr, "%s%s\n", mark, m.ID)
+				}
+				continue
+			case "/compact":
+				compactCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				summary, err := a.Compact(compactCtx)
+				cancel()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "compact: %v\n", err)
+					continue
+				}
+				if opts.Store != nil && opts.Session != nil {
+					_ = saveSession(opts.Store, opts.Session, a, opts.Provider, currentModel(), opts.Dir)
+				}
+				fmt.Fprintf(os.Stderr, "conversation compacted\n\n%s\n", summary)
+				continue
+			case "/context":
+				msgs, tokens, window := a.ContextInfo()
+				fmt.Fprintf(os.Stderr, "messages  %d (window %d)\napprox    ~%d tokens\nuse /compact to summarize\n", msgs, window, tokens)
+				continue
+			case "/undo":
+				if opts.Undo == nil {
+					fmt.Fprintln(os.Stderr, "undo is not available")
+					continue
+				}
+				out, err := opts.Undo()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "undo: %v\n", err)
+					continue
+				}
+				fmt.Fprintln(os.Stderr, out)
+				continue
+			case "/commit":
+				if opts.Commit == nil {
+					fmt.Fprintln(os.Stderr, "commit is not available")
+					continue
+				}
+				msg := strings.TrimSpace(strings.TrimPrefix(line, strings.Fields(line)[0]))
+				commitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				out, err := opts.Commit(commitCtx, msg)
+				cancel()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "commit: %v\n", err)
+					continue
+				}
+				fmt.Fprintln(os.Stderr, out)
+				continue
 			case "/status":
 				approval := "ask"
 				if a.AutoApprove() {
 					approval = "auto"
 				}
 				fmt.Fprintf(os.Stderr, "provider  %s\nmodel     %s\nserver    %s\nproject   %s\napproval  %s\nmode      %s\ntools     %d\n",
-					opts.Provider, opts.Model, opts.Server, opts.Dir, approval, agent.ModeName(a.Mode()), len(opts.Tools))
+					opts.Provider, currentModel(), opts.Server, opts.Dir, approval, agent.ModeName(a.Mode()), len(opts.Tools))
 				continue
 			case "/mode":
 				fields := strings.Fields(line)
@@ -752,7 +1053,7 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 			continue
 		}
 		if opts.Store != nil && opts.Session != nil {
-			if err := saveSession(opts.Store, opts.Session, a, opts.Provider, opts.Model, opts.Dir); err != nil {
+			if err := saveSession(opts.Store, opts.Session, a, opts.Provider, currentModel(), opts.Dir); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
 			}
 		}
