@@ -51,41 +51,61 @@ curl -fsSL https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts
 ```
 
 **Advanced mode** lets you choose Ollama, llama.cpp, or LM Studio. It reuses a
-model you already have and only downloads `gemma4:e2b` when none is found:
+model you already have and, when none is found, picks a Gemma variant based on
+detected RAM (`gemma4:e2b` below 16 GB, `gemma4:e4b` above):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts/install.sh | bash -s -- --advanced
 ```
 
-Useful flags: `--backend ollama|llamacpp|lmstudio|none`, `--model NAME`,
-`--no-model`, `--prefix DIR`, `--version TAG`, `--yes`, `--dry-run`.
-`scripts/install.sh --help` lists them all.
+On Windows, use PowerShell (Windows 10 1803+ for bundled `tar.exe`):
+
+```powershell
+irm https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts/install.ps1 | iex
+```
+
+It installs Ollama through `winget` when needed, pulls `gemma4:e2b`, verifies
+the release checksum, installs under `%LOCALAPPDATA%\metis-agent\bin`, and adds
+that directory to the user `PATH`. `-Backend none`, `-Model NAME`, `-NoModel`,
+`-InstallDir DIR`, `-Version TAG`, `-DryRun`, and `-Uninstall` are supported;
+`install.ps1 -Help` lists them all. Native `windows/arm64` builds are not
+published yet.
+
+Useful flags on Linux/macOS: `--backend ollama|llamacpp|lmstudio|none`,
+`--model NAME`, `--no-model`, `--prefix DIR`, `--version TAG`, `--yes`,
+`--dry-run`. `scripts/install.sh --help` lists them all.
 
 The installer writes:
 
 | Path | Purpose |
 |---|---|
-| `~/.local/share/metis-agent/bin/metis-agent` | the binary (Linux; `~/Library/Application Support/metis-agent` on macOS) |
+| `~/.local/share/metis-agent/bin/metis-agent` | the binary (Linux; `~/Library/Application Support/metis-agent` on macOS; `%LOCALAPPDATA%\metis-agent\bin` on Windows) |
 | `~/.local/bin/metis-agent` (and `Metis-Agent`) | launcher that starts the backend on demand |
-| `~/.config/metis-agent/config.json` (Linux) / `~/Library/Application Support/metis-agent/config.json` (macOS) | provider, endpoint, and model |
+| `~/.config/metis-agent/config.json` (Linux) / `~/Library/Application Support/metis-agent/config.json` (macOS) / `%APPDATA%\metis-agent\config.json` (Windows) | provider, endpoint, and model |
 | `~/.local/share/metis-agent/backend.log` | backend logs |
 
 It also adds `~/.local/bin` to `PATH` in your shell rc file on first run, so
 `metis-agent` works from any directory — including your home folder. Re-running
 the installer upgrades the binary and backs up an existing config first.
 
-To uninstall, remove those paths and the `# Added by metis-agent installer`
-block from your shell rc:
+To uninstall, use the installer instead of deleting files by hand:
 
 ```sh
-rm -rf ~/.local/share/metis-agent ~/.config/metis-agent \
-       ~/Library/Application\ Support/metis-agent \
-       ~/.local/bin/metis-agent ~/.local/bin/Metis-Agent
+curl -fsSL https://raw.githubusercontent.com/4matthedev/metis-agent/main/scripts/install.sh | bash -s -- --uninstall
 ```
+
+```powershell
+.\install.ps1 -Uninstall
+```
+
+That removes the binary, launcher, and PATH entry but keeps config, models,
+sessions, and undo history. Add `--purge` (or `-Purge` on Windows) to remove
+those too. Ollama, llama.cpp, and LM Studio are always left installed.
 
 ## Requirements
 
 - Go 1.25+ (only when building from source; the installer downloads a release)
+- Linux, macOS, or Windows 10 1803+ (Windows uses `scripts/install.ps1`)
 - A running OpenAI-compatible model server with streaming tool/function calling:
   - llama-prism (`http://127.0.0.1:9931`), LM Studio (`:1234`), or Ollama (`:11434`)
   - or a hosted provider such as OpenAI, OpenRouter, Groq, or Together
@@ -151,6 +171,12 @@ run. `Esc` dismisses the menu.
 | `/new` | Start a fresh session |
 | `/resume [id]` | Resume the latest (or named) session |
 | `/autoapprove [on\|off]` | Toggle or set automatic approval |
+| `/approve-edits [on\|off]` | Review in-project file edits with a diff before writing |
+| `/model [name]` | List available models or switch the active model |
+| `/compact` | Summarize the conversation and free context |
+| `/context` | Show message and approximate token usage |
+| `/undo` | Restore files changed by the previous turn |
+| `/commit [message]` | Stage everything and commit (generates a message) |
 | `/mcp [subcommand]` | Manage MCP servers: list/add/remove/reconnect (see below) |
 | `/skills [subcommand]` | Manage the skill system: list/info/use/run (see below) |
 | `/mode [name]` | Switch operating mode, or press Tab to cycle (see Modes below) |
@@ -175,7 +201,8 @@ Servers are persisted to `./.metis-agent.json` and reconnected on startup.
 - `/skills run <name>` — execute the skill's declared `run` command. This is **approval-gated** (the user confirms each run, exactly like `shell`). A skill is a `SKILL.md` file with a `name`, `description`, an optional `run` command, and a markdown body.
 
 The plain REPL supports `/help`, `/status`, `/tools`, `/reset`,
-`/autoapprove`, `/mcp`, and `/skills`; entering `/` alone prints the command list.
+`/autoapprove`, `/approve-edits`, `/model`, `/compact`, `/context`, `/undo`,
+`/commit`, `/mcp`, and `/skills`; entering `/` alone prints the command list.
 
 Each prompt keeps the previous turns in the conversation (bounded by
 `--window`), so follow-up questions work. `/reset` starts fresh.
@@ -219,7 +246,19 @@ destructive or reach outside the project:
 - non-`GET`/`HEAD` `http_fetch`,
 - non-dry-run `replace_in_files`,
 - `env_get` with `show_secrets=true`,
+- `diagnostics` (it runs build and lint programs),
 - reads or writes outside the project directory.
+
+Run with `--approve-edits` (or `/approve-edits on`) to also review every
+in-project `file_write`, `file_edit`, and `multi_edit` with a unified diff
+before it is written. The diff is computed without touching disk and appears
+in the approval block, so you see the exact change rather than a summary.
+
+Tool output is passed through a credential redactor by default. It masks PEM
+private keys, bearer tokens, `api_key`/`password`/`secret` assignments, and
+well-known token shapes (`sk-…`, `ghp_…`, `AKIA…`, `xox…`, `glpat-…`). Disable
+it with `--no-redact`, `METIS_REDACT_SECRETS=false`, or
+`"redact_secrets": false` when you are debugging a redaction false positive.
 
 In the TUI an approval block appears above the input:
 
@@ -239,6 +278,45 @@ Dangerous calls can be allowed up front with `--auto-approve` (also `-y` or
 `/autoapprove`. In non-interactive runs (`--once` with piped stdin, or a piped
 REPL) dangerous tools are denied unless auto-approval is enabled.
 
+## Undo, verification, and context
+
+**Undo.** Before a mutating tool changes a path, the registry snapshots its
+previous state. Each user turn is one checkpoint; `/undo` or `metis-agent
+--undo` restores the most recent one (new files are removed, deleted files and
+directories come back). Checkpoints live under the platform data directory
+(`.../metis-agent/checkpoints/<project-hash>`) and the last 30 per project are
+kept. Very large files and turns that exceed the snapshot budget are reported
+as skipped instead of silently ignored.
+
+**Automatic verification.** Set `verify` (or `--verify`) to a command that
+proves the change works, for example `go test ./...` or `npm test`. It runs only
+after a turn that actually changed files. A failure is fed back to the model as
+a new instruction so it can repair its work, up to two attempts; the final
+failure is then shown to you. `--verify-timeout` bounds each run.
+
+**Context.** `/context` shows message and rough token usage against `--window`.
+`/compact` asks the model to summarize the session and replaces the history
+with that summary, so long sessions can continue without losing the decisions,
+files, and next step.
+
+## Updating, diagnostics, and editors
+
+```sh
+metis-agent --check-update   # is a newer release available?
+metis-agent --update         # download, verify SHA256SUMS, replace in place
+metis-agent --doctor         # config, data dir, instructions, git, provider, models
+```
+
+`--update` only accepts the release asset that matches the running OS and
+architecture, verifies it against the release's `SHA256SUMS`, and replaces the
+binary atomically. Builds from source report their injected version; the
+release workflow sets it with `-ldflags "-X main.version=<tag>"`.
+
+For editors and scripts, `--json` streams one JSON object per line on stdout
+(`step`, `text`, `tool_call`, `tool_result`, `done`, `error`) while human-facing
+notices stay on stderr. Combine it with `--once` for a request/response
+adapter, or with `--plain` for an interactive stream.
+
 ## Flags
 
 | Flag | Default | Description |
@@ -256,6 +334,12 @@ REPL) dangerous tools are denied unless auto-approval is enabled.
 | `--no-shell` | `false` | Disable the `shell` tool |
 | `--shell-timeout` | `120` | Default shell timeout in seconds (max 900) |
 | `--auto-approve`, `-y`, `--yes` | `false` | Run dangerous tool calls without asking |
+| `--approve-edits` | `false` | Review in-project file edits with a diff before writing |
+| `--redact-secrets`, `--no-redact` | on | Redact credentials in tool output |
+| `--verify CMD` | — | Run CMD automatically after a turn that changed files |
+| `--verify-timeout N` | `120` | Auto-verify timeout in seconds |
+| `--fallback-models L` | — | Comma-separated models to try when the active one fails |
+| `--instructions L` | — | Comma-separated extra instruction files |
 | `--highlight` | `auto` | `auto`, `dark`, `light`, or `off` |
 | `--config` | — | Load a specific config file |
 | `--no-config` | `false` | Ignore config files |
@@ -265,7 +349,13 @@ REPL) dangerous tools are denied unless auto-approval is enabled.
 | `--resume` | `false` | Resume the latest session for `--dir` |
 | `--no-session` | `false` | Disable session persistence |
 | `--plain` | `false` | Disable the TUI and use the line REPL |
+| `--json` | `false` | Stream NDJSON events on stdout (implies non-TUI) |
 | `--once TASK` | — | Single-shot mode (no TUI) |
+| `--doctor` | `false` | Diagnose the installation and model backend |
+| `--update` | `false` | Download and install the latest release |
+| `--check-update` | `false` | Report whether a newer release exists |
+| `--undo` | `false` | Restore files changed by the previous turn |
+| `--version` | — | Print the version and exit |
 | `-h`, `--help` | — | Show help |
 
 ### Configuration
@@ -273,8 +363,26 @@ REPL) dangerous tools are denied unless auto-approval is enabled.
 Settings can come from a global config, a project config, environment
 variables, and flags, in that order (later wins). Run `--init-config` to write
 a starter file. Environment variables use the `METIS_` prefix, for example
-`METIS_PROVIDER`, `METIS_MODEL`, `METIS_AUTO_APPROVE`, and
-`METIS_SHELL_TIMEOUT_SEC`. See `internal/config/config.go` for the full set.
+`METIS_PROVIDER`, `METIS_MODEL`, `METIS_AUTO_APPROVE`,
+`METIS_SHELL_TIMEOUT_SEC`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`,
+`METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, and
+`METIS_FALLBACK_MODELS`. See `internal/config/config.go` for the full set.
+
+Notable fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `redact_secrets` | `true` | Mask credentials in tool output |
+| `verify` | `""` | Command to run after a turn changes files (for example `go test ./...`) |
+| `verify_timeout_sec` | `120` | Timeout for that command |
+| `instructions` | `[]` | Extra instruction files to load into the system prompt |
+| `fallback_models` | `[]` | Models to try in order when the active model fails |
+
+Instruction files are loaded from the global config directory (`AGENTS.md`,
+`METIS.md`, `rules.md`), then the project (`AGENTS.md`, `METIS.md`,
+`CLAUDE.md`, `.metis-agent/rules.md`, `.metis-agent/instructions.md`), then any
+paths listed in `instructions`. They are appended to the system prompt with
+their path as a heading.
 
 The project config is `./.metis-agent.json` (the global file is
 `$XDG_CONFIG_HOME/metis-agent/config.json`, or the platform equivalent).
@@ -317,7 +425,11 @@ its `mcp_servers` array (or the `METIS_MCP_SERVERS` environment variable).
 | `git_show` | `rev`, `path`, `file`, `stat` | Show a commit, tag, or object |
 | `git_blame` | `file`, `path`, `start_line`, `end_line` | Line-by-line authorship |
 | `http_fetch` | `url`, `method`, `headers`, `body`, `json`, `timeout_sec`, `max_bytes` | Make HTTP(S) requests and read text/JSON/HTML |
+| `web_search` | `query`, `max_results` | Search the public web without an API key |
 | `download_file` | `url`, `path`, `overwrite`, `timeout_sec`, `max_bytes` | Download a URL and write it into a file atomically |
+| `repo_map` | `path`, `include`, `max_files`, `max_symbols` | Compact symbol map (functions, types, classes) of the repository |
+| `diagnostics` | `path`, `commands`, `timeout_sec`, `stop_on_failure` | Run detected build, type-check, and lint commands |
+| `subagent` | `task` | Delegate an independent read-only investigation to a fresh agent |
 | `system_info` | — | OS, architecture, CPU count, user, temp path, and time |
 | `env_get` | `name`/`prefix`, `max_entries`, `show_secrets` | Read environment variables with secret redaction |
 | `which` | `command`/`commands` | Locate executables on PATH |
@@ -327,9 +439,12 @@ its `mcp_servers` array (or the `METIS_MCP_SERVERS` environment variable).
 | `shell` | `command`, `cwd`, `timeout_sec` | Run a non-interactive `bash -c` command |
 
 The agent is told to explore first, plan multi-step work with `todo_write`, use
-`file_edit` or `multi_edit` for small changes, use the filesystem and git tools
-instead of shell where possible, and verify with builds/tests via `shell`.
-Broad mechanical refactors can use `replace_in_files` with `dry_run=true` first.
+`repo_map` to orient itself in a large codebase, use `file_edit` or `multi_edit`
+for small changes, use the filesystem and git tools instead of shell where
+possible, and verify with `diagnostics` (or builds/tests via `shell`). Broad
+mechanical refactors can use `replace_in_files` with `dry_run=true` first.
+`subagent` runs a separate read-only agent with its own context, which keeps
+broad research out of the main conversation.
 
 **Path access and approval:** relative paths resolve against `--dir`, while
 absolute paths, `~`, `..`, and symlinks are allowed. Operations outside the
@@ -417,6 +532,10 @@ a clear `MODEL NOT LOADED` message instead of a raw HTTP dump.
 ./metis-agent --dir /tmp/metis-demo --once "Create report.txt with today's date."
 ./metis-agent --model does-not-exist --once "hello"   # MODEL NOT LOADED
 ./metis-agent --max-steps 3 --once "Do something complicated"
+./metis-agent --verify "go test ./..." --once "Fix the failing tests."
+./metis-agent --approve-edits --once "Rename the helper and update callers."
+./metis-agent --json --once "Summarize the repository."
+./metis-agent --doctor
 ./metis-agent --help
 ```
 
@@ -426,17 +545,26 @@ a clear `MODEL NOT LOADED` message instead of a raw HTTP dump.
 metis-agent/
   go.mod
   main.go                         # CLI flags, TUI/REPL/one-shot entrypoints
+  features.go                     # JSON events, undo/commit/verify, subagent wiring
+  scripts/install.sh              # Linux/macOS installer
+  scripts/install.ps1             # native Windows installer
   internal/tui/tui.go             # Bubble Tea model, input, events, layout
   internal/tui/styles.go          # palette and transcript rendering
   internal/llm/client.go          # OpenAI-compatible client, SSE streaming
+  internal/llm/router.go          # runtime model switching + fallback chain
   internal/agent/agent.go         # agent loop + progress events
   internal/memory/history.go      # history + validated sliding window
   internal/tools/registry.go      # tool registry + orchestration
   internal/tools/approval.go      # dangerous-action classification and approval state
+  internal/tools/approval_preview.go # diffs for the edit approval prompt
   internal/tools/tool.go          # tool types, schemas, path helpers
   internal/tools/file.go          # read/write/edit/list/search tools
   internal/tools/fs.go            # glob, batch read, stat, refactor, hash, move/copy/delete
   internal/tools/project.go       # project detection and repository summary
+  internal/tools/repomap.go       # symbol map across languages
+  internal/tools/diagnostics.go   # detected build/type-check/lint commands
+  internal/tools/websearch.go     # keyless web search
+  internal/tools/subagent.go      # read-only delegated research tool
   internal/tools/git.go           # status, diff, log, show, blame
   internal/tools/json.go          # JSON path queries
   internal/tools/system.go        # host info, env, which, port checks
@@ -444,6 +572,11 @@ metis-agent/
   internal/tools/web.go           # HTTP fetch and atomic downloads with SSRF guards
   internal/tools/shell.go         # shell tool: execution, timeout, output cap
   internal/config/config.go       # config file, env, and platform paths
+  internal/checkpoint/            # per-turn file snapshots for /undo
+  internal/instructions/          # AGENTS.md/METIS.md/rules loading
+  internal/redact/                # credential redaction for tool output
+  internal/update/                # GitHub release check/download/checksum/replace
+  internal/doctor/                # installation diagnostics
   internal/session/session.go     # per-project session persistence
 ```
 
@@ -455,9 +588,12 @@ metis-agent/
 3. If the model requests tools, each one runs in registration order with the
    run context (so cancellation stops a long command); the results are
    appended as `tool` messages and the model is asked again.
-4. When the model answers without tool calls, the turn is finished.
+4. When the model answers without tool calls, the turn is finished. If the
+   turn changed files and `verify` is configured, Metis runs it and feeds a
+   failure back as a new instruction (up to two repair attempts).
 5. A sliding window trims old messages without ever leaving orphaned tool
-   results or half-completed tool-call groups in the prompt.
+   results or half-completed tool-call groups in the prompt. `/compact` can
+   replace the history with a model-written summary when a session gets long.
 
 The client also accepts servers that ignore `stream: true` and return a
 single JSON completion.

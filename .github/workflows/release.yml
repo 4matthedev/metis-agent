@@ -35,7 +35,7 @@ jobs:
             [ "$os" = "windows" ] && bin="metis-agent.exe"
 
             GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" -o "dist/$bin" .
+              go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/$bin" .
 
             versioned="metis-agent_${version}_${os}_${arch}.tar.gz"
             stable="metis-agent_${os}_${arch}.tar.gz"

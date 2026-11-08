@@ -35,8 +35,11 @@ modes:
 
 ```
 metis-agent/
-├── main.go                     # CLI flags (24), TUI/REPL/one-shot entry points,
-│                               #   provider resolution, session open/save, MCP wiring
+├── main.go                     # CLI flags, TUI/REPL/one-shot entry points,
+│                               #   provider resolution, session open/save, MCP wiring,
+│                               #   version/update/doctor/undo, checkpoints + auto-verify
+├── features.go                 # NDJSON event sink, undo/commit/verify helpers,
+│                               #   read-only subagent registration
 ├── go.mod                      # module metis-agent; Go 1.25; bubbletea/bubbles/
 │                               #   lipgloss + MCP go-sdk
 ├── go.sum
@@ -45,18 +48,26 @@ metis-agent/
 │                                 #   — used ONLY by integration tests
 ├── internal/
 │   ├── agent/                  # The agent loop (see §4)
-│   │   ├── agent.go            # Agent, Run(), event emission, history ops
+│   │   ├── agent.go            # Agent, Run(), event emission, history ops,
+│   │   │                       #   Compact(), ContextInfo(), auto-verify
 │   │   ├── modes.go            # Mode prompts + policyForMode (Planner gate)
 │   │   ├── agent_test.go       # fake model tests
 │   │   └── modes_test.go       # posture/policy tests
+│   ├── checkpoint/             # Per-turn file snapshots for /undo and --undo
+│   │   ├── checkpoint.go       # Manager: Begin/Snapshot/End/Undo, pruning
+│   │   └── checkpoint_test.go
 │   ├── config/                 # JSON config + env + platform paths
 │   │   ├── config.go           # Values, File, Defaults(), ApplyEnv(), Validate()
 │   │   └── config_test.go
+│   ├── doctor/                 # Installation diagnostics for --doctor
+│   ├── instructions/           # AGENTS.md/METIS.md/CLAUDE.md/rules loading
 │   ├── llm/                    # OpenAI-compatible client
 │   │   ├── client.go           # SSE parser, JSON fallback, streaming, model-not-loaded
 │   │   ├── provider.go         # provider presets, Resolve(), probing, --list-models
+│   │   ├── router.go           # runtime model switch + fallback chain
 │   │   ├── client_test.go
-│   │   └── provider_test.go
+│   │   ├── provider_test.go
+│   │   └── router_test.go
 │   ├── memory/                 # Conversation history
 │   │   ├── history.go          # sliding window + well-formedness invariant
 │   │   └── history_test.go
@@ -65,6 +76,7 @@ metis-agent/
 │   │   ├── manager.go          # Manager: /mcp add/remove/reconnect/list,
 │   │   │                       #   config persistence + registry reload
 │   │   └── manager_test.go
+│   ├── redact/                 # Credential redaction for tool output
 │   ├── skills/                 # Skill system: discover, load, run SKILL.md files
 │   │   ├── skill.go            # Skill type + ParseSkill (frontmatter + body)
 │   │   ├── manager.go          # Manager: List/Get/Command/RunCommand, search paths
@@ -72,9 +84,12 @@ metis-agent/
 │   ├── session/                # Per-project session persistence
 │   │   ├── session.go          # Session, Store, atomic Save()
 │   │   └── session_test.go
-│   ├── tools/                  # Tool registry + 33 built-in tools + approval
-│   │   ├── registry.go         # Registry, Execute(), approval gating
+│   ├── update/                 # GitHub release check/download/checksum/replace
+│   ├── tools/                  # Tool registry + built-in tools + approval
+│   │   ├── registry.go         # Registry, Execute(), approval gating,
+│   │   │                       #   mutation hooks/counter, redaction
 │   │   ├── approval.go         # needApproval(), ApprovalDecision/Approver, insideProject()
+│   │   ├── approval_preview.go # diff previews for edit approvals
 │   │   ├── tool.go             # Tool type, schema helpers, path resolvers
 │   │   ├── file.go             # list_dir, glob, project_info, file_read(_many),
 │   │   │                        #   file_stat, search, hash_file, json_query
@@ -82,6 +97,10 @@ metis-agent/
 │   │   │                        #   make_dir, file_move/copy/delete, diff_files
 │   │   ├── git.go              # git_status/diff/log/show/blame
 │   │   ├── project.go          # language/manifest/git detection, project_info
+│   │   ├── repomap.go          # repo_map symbol outline
+│   │   ├── diagnostics.go      # diagnostics: detected build/type-check/lint
+│   │   ├── websearch.go        # web_search (DuckDuckGo HTML, no API key)
+│   │   ├── subagent.go         # subagent tool wrapper (runner injected from main)
 │   │   ├── json.go             # json_query
 │   │   ├── system.go           # system_info, env_get, which, port_check
 │   │   ├── todo.go             # in-session todo store
@@ -94,43 +113,53 @@ metis-agent/
 │       ├── tui.go              # Model, Update loop, key handling
 │       ├── commands.go         # slash commands + completion menu
 │       ├── sessions.go         # /session, /sessions, resume & naming
-│       ├── approvals.go        # approval prompts and decisions
-│       ├── view.go             # layout, transcript, header/status/input
+│       ├── approvals.go        # approval prompts, diff previews, decisions
+│       ├── view.go             # layout, transcript, header/status/input, context meter
 │       ├── styles.go           # palette, transcript rendering
 │       ├── highlight.go        # chroma-based syntax highlighting
 │       ├── markdown.go         # glamour-based Markdown rendering
 │       ├── diff.go             # unified diff rendering
 │       └── tui_test.go
 ├── scripts/
-│   └── install.sh              # curl installer (easy/advanced backends)
+│   ├── install.sh              # curl installer (easy/advanced, --uninstall)
+│   └── install.ps1             # native Windows installer
 ├── .github/workflows/
 │   ├── ci.yml                  # fmt, vet, build, race, cross-builds
-│   └── release.yml             # tag -> release tarballs + SHA256SUMS
+│   └── release.yml             # tag -> versioned binaries + SHA256SUMS
 ├── Makefile                    # make check / race / cover
 └── LICENSE                     # MIT
 ```
 
 ### Dependency graph (who calls whom)
 ```
-main.go ──> internal/llm      (resolve provider + model, build Client)
+main.go ──> internal/llm      (resolve provider + model, build Router)
            ──> internal/config (load + merge config)
            ──> internal/tools  (build Registry)
            ──> internal/mcp    (connect MCP servers, register external tools)
            ──> internal/session (open/save session)
+           ──> internal/checkpoint (per-turn snapshots for undo)
+           ──> internal/instructions (AGENTS.md/rules prompt sections)
+           ──> internal/update (--update / --check-update)
+           ──> internal/doctor (--doctor)
            ──> internal/agent  (Agent; owns the loop)
                  ──> internal/memory (History)
            ──> internal/tui    (TUI/REPL entry)
 
 internal/agent   ──> llm (Complete), tools (Registry.Execute), memory (History)
-internal/tools   ──> llm (schema types only), config (not) — self-contained executors
+internal/tools   ──> llm (schema types only), redact (output) — mostly self-contained
 internal/tui     ──> agent (events), session, tools (approval types)
 internal/session ──> llm (Message), config (DataDir)
+internal/checkpoint ──> config (DataDir)
+internal/instructions ──> config (ConfigDir)
+internal/doctor  ──> config, checkpoint, instructions, llm, session
 internal/mcp     ──> mcp go-sdk
 ```
 **Rule of thumb:** `internal/llm` is a leaf (no internal deps). `internal/agent`
 depends on `llm`, `memory`, `tools`. `internal/tui` depends on `agent`,
 `session`, `tools`. Never add a dependency *up* the graph (e.g. don't import
-`internal/tools` from `internal/llm`).
+`internal/tools` from `internal/llm`). `features.go` is the only place that
+wires the parent registry, the subagent's read-only registry, and the router
+together.
 
 ---
 
@@ -146,8 +175,8 @@ depends on `llm`, `memory`, `tools`. `internal/tui` depends on `agent`,
 |---|---|
 | Global config | `~/.config/metis-agent/config.json` |
 | Project config | `./.metis-agent.json` |
-| Env | `METIS_PROVIDER`, `METIS_MODEL`, `METIS_BASE_URL`, `METIS_API_KEY`, `METIS_TEMPERATURE`, `METIS_MAX_STEPS`, `METIS_WINDOW`, `METIS_SHELL_TIMEOUT_SEC`, `METIS_AUTO_APPROVE`, `METIS_MCP_SERVERS` |
-| Flags | `--provider`, `--model`, `--base-url`, `--temp`, `--max-steps`, `--window`, `--dir`, `--auto-approve`, `--once`, … |
+| Env | `METIS_PROVIDER`, `METIS_MODEL`, `METIS_BASE_URL`, `METIS_API_KEY`, `METIS_TEMPERATURE`, `METIS_MAX_STEPS`, `METIS_WINDOW`, `METIS_SHELL_TIMEOUT_SEC`, `METIS_AUTO_APPROVE`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`, `METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, `METIS_FALLBACK_MODELS`, `METIS_MCP_SERVERS` |
+| Flags | `--provider`, `--model`, `--base-url`, `--temp`, `--max-steps`, `--window`, `--dir`, `--auto-approve`, `--approve-edits`, `--verify`, `--fallback-models`, `--once`, `--json`, `--doctor`, `--update`, `--undo`, … |
 
 The config file shape (`internal/config/File`) uses **pointers** so an unset field
 doesn't override a zero value. `File.Apply(&v)` overlays only non-nil fields.
@@ -157,7 +186,15 @@ servers (same-name entries from env win).
 Key flags (defaults): `--temp 0.3`, `--max-steps 40`, `--window 64`,
 `--shell-timeout 120` (clamped 1–900 in the shell tool), `--dir .`,
 `--no-shell`, `--plain`, `--once`, `--session NAME`, `--resume`, `--no-session`,
-`--list-models`, `--init-config`, `--highlight auto|dark|light|off`.
+`--list-models`, `--init-config`, `--highlight auto|dark|light|off`,
+`--redact-secrets` (default on; `--no-redact` turns it off),
+`--verify-timeout 120`, `--approve-edits`, `--json`.
+
+Feature-only config fields: `redact_secrets *bool`, `verify *string`,
+`verify_timeout_sec *int`, `instructions []string`, `fallback_models []string`.
+`WriteDefault` writes all of them so `--init-config` documents the available
+knobs. `instructions` entries may be absolute or relative to `--dir`; they are
+loaded after the conventional global and project files.
 
 ---
 
@@ -166,16 +203,25 @@ Key flags (defaults): `--temp 0.3`, `--max-steps 40`, `--window 64`,
 `Agent.Run(ctx, user)` does, per user task:
 
 1. `history.Append(user message)`.
-2. Repeat up to `MaxSteps`:
+2. Call `BeginTurn` (checkpoint manager starts a new snapshot batch) and reset
+   the registry's mutation counter; defer `EndTurn`.
+3. Repeat up to `MaxSteps`:
    - send `system prompt + windowed history + tool schemas` with `stream: true`.
    - stream text deltas to the UI via `EventText`.
    - **If tool calls:** append an `assistant` message with `ToolCalls`; run each
      tool **in order** (so cancellation stops a long command); append a `tool`
      message per result; **continue** (another model turn).
-   - **If final answer** (no tool calls, non-empty): append `assistant` message,
-     emit `EventDone`, return.
-3. On `ctx` cancel, `Complete` error, or empty-turn exhaustion: `history.Truncate(base)`
+   - **If final answer** (no tool calls, non-empty): run `Verify` when
+     configured and the turn mutated files; a failure is appended as a new user
+     message and the loop continues (at most `MaxVerifyAttempts`, default 2).
+     Otherwise append the `assistant` message, emit `EventDone`, return.
+4. On `ctx` cancel, `Complete` error, or empty-turn exhaustion: `history.Truncate(base)`
    to roll back the partial step, emit `EventError`, return.
+
+`Compact(ctx)` summarizes the visible transcript with the configured model and
+replaces history with a summary/acknowledgement pair. `ContextInfo()` returns
+message count, an approximate token count (content + tool arguments / 4), and
+the configured window for `/context` and the status meter.
 
 **Key invariants to preserve:**
 - **One model turn per step**, and the history is only advanced atomically on
@@ -184,8 +230,10 @@ Key flags (defaults): `--temp 0.3`, `--max-steps 40`, `--window 64`,
   block (the TUI routes events through Bubble Tea's `p.Send`, which is safe).
 - The agent holds `a.mu` for the **entire duration of `Run`** — never re-enters
   or holds other locks. `SetEventSink`/`SetApprover` etc. take the lock too.
+  `Compact` also holds `a.mu`, so it cannot run concurrently with `Run`.
 - `Completer` is an interface (`Complete(ctx, messages, tools, onToken)`), so the
-  loop is testable with a fake model (`internal/agent/agent_test.go`).
+  loop is testable with a fake model (`internal/agent/agent_test.go`). The real
+  implementation in `main.go` is `llm.Router`.
 
 **Events (`agent.Event`):** `EventStep`, `EventText`, `EventToolCall`,
 `EventToolResult`, `EventDone`, `EventError`. Each carries `Step`, `Text`,
@@ -249,22 +297,49 @@ for the test vectors).
 2. Parse JSON args (empty/`{}` → empty map).
 3. **Approval gate:** `needApproval(name, args)` — if it needs it, ask via the
    `Approver`; a `nil` approver **denies** (never silently allows).
-4. Run `Handler(ctx, args)`; return a string (errors as `"error: …"`).
-5. **Cap the result at `maxToolResult` (96KB)** via `truncateText` (head + tail)
-   so long output can't flood the model context.
+4. Resolve the paths the tool will mutate (`mutationPaths`), notify mutation
+   hooks (checkpoints snapshot each path), then run `Handler(ctx, args)`.
+5. On success, count the mutation; cap the result at `maxToolResult` (96KB) via
+   `truncateText` (head + tail) and redact credentials (unless disabled).
 
-### Built-in tools (~33)
+### Built-in tools (~38)
 Registered in `registry.go` in groups:
-- **Discovery/reading:** `list_dir`, `glob`, `project_info`, `file_read`,
-  `file_read_many`, `file_stat`, `search`, `hash_file`, `json_query`
+- **Discovery/reading:** `list_dir`, `glob`, `project_info`, `repo_map`,
+  `file_read`, `file_read_many`, `file_stat`, `search`, `hash_file`, `json_query`
 - **Editing/filesystem:** `file_edit`, `multi_edit`, `replace_in_files`,
   `file_write`, `make_dir`, `file_move`, `file_copy`, `file_delete`, `diff_files`
 - **Git:** `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
-- **Web/system:** `http_fetch`, `download_file`, `system_info`, `env_get`,
-  `which`, `port_check`
+- **Web/system:** `http_fetch`, `web_search`, `download_file`, `system_info`,
+  `env_get`, `which`, `port_check`
+- **Verification:** `diagnostics` (detects Go/Rust/Node/Python checks)
+- **Delegation:** `subagent` (read-only nested agent, injected from `features.go`)
 - **Planning:** `todo_write`, `todo_read`
 - **Shell:** `shell` (approval-gated; disabled with `--no-shell`)
 - **Time:** `time`
+
+`web_search` scrapes DuckDuckGo's HTML endpoints, so it needs no API key; it is
+read-only and not approval-gated. `subagent` runs a fresh `agent.Agent` against
+a separate registry with `SetPolicy(readOnlyPolicy)`, which allows reads,
+search, git inspection, web fetches, and `repo_map` but refuses every mutation
+and `shell`. The nested registry never contains `subagent` itself, so recursion
+is impossible.
+
+### Mutation hooks, redaction, and edit previews
+- `Registry.AddMutationHook(fn)` receives `(name, args, paths)` **before** a
+  mutating handler runs. `main.go` uses it to snapshot each path in
+  `internal/checkpoint`.
+- `Registry.Mutations()` counts successful mutating calls in the current run;
+  `ResetMutations()` is called at the start of every `Agent.Run`. Auto-verify
+  only fires when this counter is non-zero.
+- `Registry.SetRedactSecrets(bool)` (default from config) passes every tool
+  result through `internal/redact.String`. It masks PEM private keys, bearer
+  tokens, key/value assignments, and known token prefixes. `env_get` also uses
+  `redact.LooksSecret` for name-based masking.
+- `Registry.SetApproveEdits(bool)` / `--approve-edits` makes in-project
+  `file_write`, `file_edit`, and `multi_edit` ask for approval with a unified
+  diff. `previewMutation` computes the result without touching disk and returns
+  `""` when a faithful preview is impossible (binary/oversized files, ambiguous
+  `old_text`); the normal write path then proceeds without a preview.
 
 Each tool is an OpenAI function schema (`Name`/`Description`/`Parameters` JSON schema
 via `objectSchema(...)`) + a `Handler(ctx, args map[string]any) (string, error)`.
@@ -279,11 +354,13 @@ allowed. Instead of blocking, `needApproval()` prompts before:
 | Action | Always prompt? |
 |---|---|
 | `shell` | Yes, every command |
+| `diagnostics` | Yes (it runs build/lint programs) |
 | `file_delete` | Yes (incl. recursive) |
 | `download_file` | Yes |
 | `http_fetch` | Non-GET/HEAD only |
 | `replace_in_files` | Non-dry-run, or any path outside project |
 | `env_get` | `show_secrets=true` |
+| In-project `file_write`/`file_edit`/`multi_edit` | Only with `--approve-edits`; the prompt includes a unified diff |
 | Out-of-project read/write (`file_write`, `file_edit`, `multi_edit`, `make_dir`,
   `file_move`, `file_copy`, reads, `git_*`) | Yes, if `!insideProject()` |
 
@@ -340,6 +417,14 @@ allowed** so local dev servers can be inspected. Redirects checked every hop
 - **Errors:** `ClientError` wraps `Cause`/`Status`/`Body`. `IsModelNotLoaded`
   detects "not loaded"/"not found + model" in the body and yields a clear
   `MODEL NOT LOADED` message (no raw HTTP dump).
+- **`Router`** (`router.go`) is the `Completer` used by `main.go`. It owns the
+  active client/model and an ordered fallback chain (`--fallback-models`).
+  `Complete` tries the active model, then each fallback; a successful fallback
+  becomes active and calls the switch callback. `SetModel`/`Model` power
+  `/model`; the router is safe for concurrent readers (client/model behind an
+  `RWMutex`). Streaming output from a failed attempt may already have been
+  emitted, so fallbacks are best for "model unavailable" failures rather than
+  mid-stream errors.
 - **URL handling** (`endpointURLs`): accepts a host URL, `host/v1`, or even a full
   chat URL; normalizes to `/v1/chat/completions` + `/v1/models`.
 
@@ -471,6 +556,8 @@ Bubble Tea model (`tui.go`, ~1400 lines):
 - **Input:** textarea; Enter submits; **Alt+Enter / Ctrl+J** inserts a newline.
   Ctrl+P/N scroll message history. PgUp/PgDn + mouse wheel scroll the viewport.
 - **Transcript:** per-step tool output, **expandable with Ctrl+O** (`expandTools`).
+- **Status:** live context meter (`ctx <messages>/<window>`), current model from
+  the router (`ModelName`), and active mode.
 - **Slash menu:** type `/`, filter, arrow-key to select, Tab/Enter to complete,
   Enter to run. Esc dismisses.
 - **Keys:** Enter send · Alt+Enter/Ctrl+J newline · Esc/Ctrl+C cancel run ·
@@ -478,9 +565,13 @@ Bubble Tea model (`tui.go`, ~1400 lines):
   Ctrl+C idle / Ctrl+D quit · y/a/A/n approval · ↑/↓/Tab/Enter slash menu.
 - **Markdown/rendering:** `markdown.go` (goldmark + glamour), `highlight.go`
   (chroma), `diff.go` (unified diff).
+- **Long operations:** approval previews can be multi-line; `/model` blocks up
+  to 10s while listing; `/compact` and `/commit` run through the spinner and
+  respect Esc cancellation.
 
-Slash commands (TUI): `/help /clear /reset /status /tools /expand /session /sessions /new /resume [id] /autoapprove [on|off] /mcp /skills /quit`.
-Plain REPL supports: `/help /reset /status /tools /autoapprove [on|off] /mcp /skills /quit`.
+Slash commands (TUI): `/help /clear /reset /status /tools /expand /session /sessions /new /resume [id] /autoapprove [on|off] /approve-edits [on|off] /model [name] /compact /context /undo /commit [message] /mcp /skills /mode /quit`.
+Plain REPL supports the same set except `/expand`, `/session`, `/sessions`,
+`/new`, `/resume`, and `/mode`; entering `/` prints the full list.
 `/mcp [list|add|remove|reconnect]` manages MCP servers (see §8).
 
 ---
@@ -499,10 +590,14 @@ Plain REPL supports: `/help /reset /status /tools /autoapprove [on|off] /mcp /sk
 - **Approval:** if you add a new destructive/out-of-project tool, you **must**
   add it to `needApproval()` in `approval.go`, or it will run unprompted.
   New MCP tools are auto-covered (external).
+- **Mutation tracking:** if the tool changes local files, add its argument →
+  path mapping to `Registry.mutationPaths` so checkpoints and auto-verify see
+  it. Without an entry the call is treated as read-only.
 - **History:** never shape messages in a way that breaks the well-formedness
   invariant (§5). Add test vectors if you change `Messages()`/`sanitizeMessages`.
 - **Config:** add new fields to `Values` + `File` (pointer) + `ApplyEnv` (a
-  `METIS_*` var) + flag in `main.go` + `Validate()`. Keep precedence order.
+  `METIS_*` var) + flag in `main.go` + `Validate()` + `WriteDefault()`. Keep
+  precedence order.
 
 ### Adding a new built-in tool (checklist)
 1. Implement `Handler(ctx, args map[string]any) (string, error)` in the appropriate
@@ -510,25 +605,28 @@ Plain REPL supports: `/help /reset /status /tools /autoapprove [on|off] /mcp /sk
 2. Build the `Tool{ Name, Description, Parameters: objectSchema(...) }`.
 3. `r.Add(NewXTool(...))` in `registry.go` in the right group.
 4. If destructive / out-of-project / network, add a case to `needApproval()`
-   in `approval.go`.
-5. Add a test in the matching `*_test.go` (or `tool_test.go`).
-6. Document the tool in `README.md` (Tools table) and the system prompt in
-   `main.go` (`defaultSystemPrompt` / `helpText`) if it changes behavior.
+   in `approval.go`; if it writes files, add a case to `mutationPaths`.
+5. If a read-only tool should be available to `subagent`, add its name to
+   `readOnlyPolicy` in `features.go`.
+6. Add a test in the matching `*_test.go` (or `tool_test.go`).
+7. Document the tool in `README.md` (Tools table) and the system prompt in
+   `main.go` (`baseSystemPrompt` / `helpText`) if it changes behavior.
 
 ### Adding a new MCP transport or server config field
 Update `ServerConfig`, `Connect()`, `DefaultServerName()`, and the config
 docs. Remember: all MCP tools **stay external** (approval-gated).
 
 ### Testing conventions
-- Unit tests live in `*_test.go` beside the package (no test files for
-  `session`, `config` — if you change them, consider adding coverage).
+- Unit tests live in `*_test.go` beside the package. New packages
+  (`checkpoint`, `redact`, `instructions`, `update`) ship with focused tests.
 - Use fake models for the agent loop (`internal/agent/agent_test.go` shows the
   pattern with a `Completer` stub).
 - `cmd/mcp-smoke-server` is the fixture for MCP integration tests.
 - The TUI is tested at a light level (`tui_test.go`) — rendering is expensive.
+- The root package tests (`features_test.go`) cover flag helpers, the read-only
+  policy, verification, and the NDJSON sink.
 - **`go test ./...` must pass; `go test -race ./...` must pass.**
-  Target coverage for core packages: `agent` ~73%, `llm` ~37%, `memory` ~53%.
-  Overall ~27%. **Don't delete existing test vectors.**
+  **Don't delete existing test vectors.**
 
 ### Verification (run these after any change)
 ```sh
@@ -565,6 +663,14 @@ that blocks legitimate workflows; do not remove the approval gate either.**
 6. **Session atomicity.** Temp file + Sync + Rename; never a torn file.
 7. **SSRF guards** block link-local/cloud-metadata but allow loopback/private
    (intentional, for local dev servers).
+8. **Undo is a safety net, not a sandbox.** Mutation hooks snapshot paths before
+   writes; `/undo` restores the previous turn. Skipped (too large/budget) paths
+   are reported, never silently claimed as restored.
+9. **Redaction is on by default.** Tool output passes through
+   `internal/redact` unless the user explicitly disables it. Do not redact the
+   model's own final answer or user input.
+10. **Updates verify checksums.** `--update` accepts only the matching platform
+    asset and refuses a missing/mismatched `SHA256SUMS` entry.
 
 ---
 
@@ -581,24 +687,44 @@ that blocks legitimate workflows; do not remove the approval gate either.**
 | How does the TUI render/approve? | `internal/tui/tui.go` |
 | How is config loaded/merged? | `internal/config/config.go` + `main.go` |
 | How are sessions saved? | `internal/session/session.go` |
+| How does `/undo` snapshot files? | `internal/checkpoint/checkpoint.go` |
+| How are credentials redacted? | `internal/redact/redact.go` |
+| How are AGENTS.md/rules loaded? | `internal/instructions/instructions.go` |
+| How does `--update` work? | `internal/update/update.go` |
+| How does `--doctor` work? | `internal/doctor/doctor.go` |
+| How do model fallbacks work? | `internal/llm/router.go` + `features.go` |
 | How are MCP tools wired? | `internal/mcp/mcp.go` + `internal/mcp/manager.go` + `main.go` |
 | How are skills discovered/used? | `internal/skills/skill.go` + `manager.go` + `main.go` |
 | What tools exist + their schemas? | `internal/tools/*.go` (`registry.go` order) |
 | How to build/test? | §12 (How to make a change, verification) |
-| How does the curl installer work? | §15 + `scripts/install.sh` |
+| How do the installers work? | §15 + `scripts/install.sh` + `scripts/install.ps1` |
 
 ---
 
-## 15. Installer & releases (`scripts/install.sh`, `release.yml`)
+## 15. Installer & releases (`scripts/install.sh`, `scripts/install.ps1`, `release.yml`)
 
-The installer is the supported path for end users. It has two modes:
+The installers are the supported path for end users. POSIX has two modes:
 
 - **easy** (default): installs Ollama, pulls `gemma4:e2b`, writes the global
   config, installs the launcher.
 - **advanced**: picks Ollama / llama.cpp / LM Studio, reuses an installed model,
-  and offers `gemma4:e2b` only when the backend has none.
+  and when none exists recommends a model from detected RAM (`gemma4:e2b`
+  below 16 GB, `gemma4:e4b` above).
 
-Layout it creates:
+`--uninstall` removes the binary, launcher, and the PATH block from bash/zsh/
+fish rc files. It keeps config/data/models by default; `--purge` removes them.
+`install.sh` never uninstalls Ollama, llama.cpp, or LM Studio.
+
+`scripts/install.ps1` is the native Windows path (Windows 10 1803+ for bundled
+`tar.exe`). It resolves the latest tag through the GitHub API, downloads
+`metis-agent_<version>_windows_amd64.tar.gz`, verifies `SHA256SUMS`, extracts
+with `tar.exe`, installs to `%LOCALAPPDATA%\metis-agent\bin`, updates the user
+`PATH`, and can install Ollama with `winget` and pull `gemma4:e2b`. Config goes
+to `%APPDATA%\metis-agent\config.json` and is written without a UTF-8 BOM.
+`-Uninstall`/`-Purge` mirror the POSIX flow. `windows/arm64` is not published
+yet and the script says so instead of installing the wrong binary.
+
+Layout POSIX creates:
 
 | Path | Purpose |
 |---|---|
@@ -610,9 +736,10 @@ Layout it creates:
 
 The paths must match `internal/config`: Linux honours `XDG_CONFIG_HOME` and
 `XDG_DATA_HOME`; macOS uses `~/Library/Application Support/metis-agent` for
-both because `os.UserConfigDir` ignores XDG there.
+both because `os.UserConfigDir` ignores XDG there; Windows uses
+`%APPDATA%` for config and `%LOCALAPPDATA%` for data.
 
-**Release asset naming is a contract.** `scripts/install.sh` downloads:
+**Release asset naming is a contract.** Both installers download:
 
 ```
 /releases/latest/download/metis-agent_<os>_<arch>.tar.gz
@@ -622,9 +749,11 @@ both because `os.UserConfigDir` ignores XDG there.
 
 Each tarball contains a single `metis-agent` (or `metis-agent.exe` on Windows)
 at its root. `release.yml` publishes both the versioned and stable names and a
-`SHA256SUMS` covering both. If you rename assets, update the installer in the
-same commit. When no release exists the installer falls back to `git clone` +
-`go build`.
+`SHA256SUMS` covering both, and injects the version with
+`-ldflags "-X main.version=${version}"`. `main.go` reads it in `--version`,
+`--check-update`, and `--update`; development builds report `dev`. If you rename
+assets, update both installers and `internal/update` in the same commit. When no
+release exists the POSIX installer falls back to `git clone` + `go build`.
 
 The generated launcher embeds the backend choice at install time, so changing
 `config.json` by hand does not change which process the launcher starts. The

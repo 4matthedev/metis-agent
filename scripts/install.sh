@@ -34,6 +34,8 @@ PREFIX=""
 VERSION="latest"
 INSTALL_BACKEND=1
 PULL_MODEL=1
+UNINSTALL=0
+PURGE=0
 
 # --- output -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -62,8 +64,10 @@ TMP_DIRS=()
 cleanup() {
   local d
   for d in "${TMP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] || continue
+    rm -rf "$d"
   done
+  return 0
 }
 trap cleanup EXIT
 
@@ -129,6 +133,8 @@ Options:
   --no-backend        Install Metis only (same as --backend none)
   --version TAG       Install a specific release (e.g. 0.1.0; default: latest)
   --prefix DIR        Install prefix (default: \$HOME/.local)
+  --uninstall         Remove Metis (keeps config, models, and checkpoints)
+  --purge             With --uninstall, also remove config, sessions, and data
   --yes, -y           Assume yes for all prompts
   --dry-run           Print actions without changing anything
   -h, --help          Show this help
@@ -151,6 +157,8 @@ while [ $# -gt 0 ]; do
     --version) shift; VERSION="${1:-latest}" ;;
     --prefix) shift; PREFIX="${1:-}" ;;
     --yes|-y) ASSUME_YES=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    --purge) PURGE=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -197,6 +205,93 @@ LOG_FILE="$DATA_DIR/backend.log"
 WRAPPER="$BIN_DIR/metis-agent"
 REAL_BIN="$DATA_DIR/bin/metis-agent"
 
+# --- hardware detection -----------------------------------------------------
+detect_ram_gb() {
+  local bytes=0
+  if [ "$OS" = "darwin" ]; then
+    bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+  elif [ -r /proc/meminfo ]; then
+    local kb
+    kb="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+    [ -n "$kb" ] && bytes=$((kb * 1024))
+  fi
+  if [ "${bytes:-0}" -le 0 ]; then
+    echo 0
+    return 0
+  fi
+  echo $((bytes / 1024 / 1024 / 1024))
+}
+
+# recommended_model picks the Gemma variant that comfortably fits this machine.
+recommended_model() {
+  local ram
+  ram="$(detect_ram_gb)"
+  if [ "$ram" -ge 16 ]; then
+    printf '%s' "gemma4:e4b"
+  else
+    printf '%s' "$DEFAULT_MODEL"
+  fi
+}
+
+# --- uninstall --------------------------------------------------------------
+strip_installer_path_lines() {
+  local file="$1" tmp
+  [ -f "$file" ] || return 0
+  grep -q "Added by metis-agent installer" "$file" 2>/dev/null || return 0
+  tmp="$file.metis-uninstall.$$"
+  awk -v bin="$BIN_DIR" '
+    /Added by metis-agent installer/ { skip = 1; next }
+    skip == 1 {
+      if (index($0, bin) > 0 || index($0, "fish_add_path") > 0) { skip = 0; next }
+      skip = 0
+    }
+    { print }
+  ' "$file" >"$tmp" && mv "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+uninstall_metis() {
+  step "Uninstalling Metis Agent"
+  local removed=0 f rc
+  for f in "$WRAPPER" "$BIN_DIR/Metis-Agent" "$REAL_BIN"; do
+    if [ -e "$f" ] || [ -L "$f" ]; then
+      if [ "$DRY_RUN" -eq 0 ]; then rm -f "$f"; fi
+      ok "removed $f"
+      removed=1
+    fi
+  done
+  if [ "$removed" -eq 0 ]; then
+    warn "no Metis files found under ${PREFIX}"
+  fi
+
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
+    [ -f "$rc" ] || continue
+    grep -q "Added by metis-agent installer" "$rc" 2>/dev/null || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      ok "would remove the PATH entry from $rc"
+    else
+      strip_installer_path_lines "$rc"
+      ok "removed the PATH entry from $rc"
+    fi
+  done
+
+  if [ "$PURGE" -eq 1 ]; then
+    for f in "$DATA_DIR" "$CONFIG_DIR"; do
+      if [ -d "$f" ]; then
+        if [ "$DRY_RUN" -eq 0 ]; then rm -rf "$f"; fi
+        ok "removed $f"
+      fi
+    done
+  else
+    say "kept data and config:"
+    say "  ${DATA_DIR} (models, sessions, undo history)"
+    say "  ${CONFIG_DIR}/config.json"
+    say "run with --purge to remove them too"
+  fi
+  say "Ollama, llama.cpp, and LM Studio were left installed."
+  say "Open a new terminal to refresh PATH."
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
 step "Metis Agent installer"
@@ -205,6 +300,11 @@ say "prefix:   ${PREFIX}"
 say "data:     ${DATA_DIR}"
 say "config:   ${CONFIG_FILE}"
 [ "$DRY_RUN" -eq 1 ] && warn "dry run: nothing will be installed"
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  uninstall_metis
+  exit 0
+fi
 
 need curl
 need tar
@@ -368,8 +468,9 @@ start_ollama() {
 
 # select_ollama_model sets MODEL for the ollama backend.
 select_ollama_model() {
-  local installed first
+  local installed first rec
   installed="$(ollama_models)"
+  rec="$(recommended_model)"
   if [ "$MODEL_EXPLICIT" -eq 0 ] && [ "$MODE" = "easy" ]; then
     MODEL="$DEFAULT_MODEL"
   fi
@@ -393,14 +494,14 @@ select_ollama_model() {
     if [ "$TTY_FD" -ne 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
       local -a opts=()
       while IFS= read -r line; do [ -n "$line" ] && opts+=("$line"); done <<<"$installed"
-      opts+=("Pull ${DEFAULT_MODEL} instead")
+      opts+=("Pull ${rec} instead")
       local choice idx
       choice="$(ask_choice "Which Ollama model should Metis use?" 1 "${opts[@]}")"
       idx=$((choice-1))
       if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#opts[@]}" ] && [ "$idx" -ne $((${#opts[@]}-1)) ]; then
         MODEL="${opts[$idx]}"
       elif [ "$idx" -eq $((${#opts[@]}-1)) ]; then
-        MODEL="$DEFAULT_MODEL"
+        MODEL="$rec"
         run ollama pull "$MODEL"
       else
         MODEL="$first"
@@ -412,13 +513,18 @@ select_ollama_model() {
     return 0
   fi
 
-  if [ "$PULL_MODEL" -eq 1 ] && ask_yes_no "No Ollama model found. Pull ${DEFAULT_MODEL} (several GB)?" y; then
-    MODEL="$DEFAULT_MODEL"
+  local ram
+  ram="$(detect_ram_gb)"
+  if [ "$ram" -gt 0 ]; then
+    say "detected ${ram} GB of RAM; recommending ${rec}"
+  fi
+  if [ "$PULL_MODEL" -eq 1 ] && ask_yes_no "No Ollama model found. Pull ${rec} (several GB)?" y; then
+    MODEL="$rec"
     step "Pulling ${MODEL}"
     run ollama pull "$MODEL"
   else
     MODEL=""
-    warn "no model configured; pass --model later or run: ollama pull ${DEFAULT_MODEL}"
+    warn "no model configured; pass --model later or run: ollama pull ${rec}"
   fi
 }
 
@@ -815,8 +921,13 @@ if [ "$INSTALL_BACKEND" -eq 1 ]; then
     step "Would configure backend: $BACKEND"
     case "$BACKEND" in
       ollama)
-        say "would install/start Ollama and use ${MODEL:-$DEFAULT_MODEL}"
-        [ -n "$MODEL" ] || MODEL="$DEFAULT_MODEL"
+        if [ "$MODE" = "easy" ]; then
+          dry_model="${MODEL:-$DEFAULT_MODEL}"
+        else
+          dry_model="${MODEL:-$(recommended_model)}"
+        fi
+        say "would install/start Ollama and use ${dry_model}"
+        MODEL="$dry_model"
         ;;
       llamacpp)
         say "would install llama.cpp and use ${MODEL:-$LLAMA_ALIAS}"
