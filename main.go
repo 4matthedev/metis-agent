@@ -685,7 +685,7 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 				fmt.Fprintf(os.Stderr, "provider  %s\nmodel     %s\nserver    %s\nproject   %s\napproval  %s\nmode      %s\ntools     %d\n",
 					opts.Provider, opts.Model, opts.Server, opts.Dir, approval, agent.ModeName(a.Mode()), len(opts.Tools))
 				continue
-						case "/mode":
+			case "/mode":
 				fields := strings.Fields(line)
 				if len(fields) > 1 {
 					m := parseMode(strings.ToLower(fields[1]))
@@ -701,7 +701,7 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 					fmt.Fprintln(os.Stderr, "switch with: /mode <name> (general, planner, builder, debugger, cybersecurity, simplifier)")
 				}
 				continue
-case "/tools":
+			case "/tools":
 				fmt.Fprintf(os.Stderr, "%d tools\n", len(opts.Tools))
 				for _, name := range opts.Tools {
 					fmt.Fprintf(os.Stderr, "  %s\n", name)

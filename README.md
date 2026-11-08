@@ -88,7 +88,7 @@ or `--plain` falls back to the REPL, which is handy for scripts.
 | `Ctrl+C` (idle), `Ctrl+D` | Quit |
 | `y` / `a` / `A` / `n` | Answer an approval prompt |
 | `↑` / `↓` | Choose a command when the `/` menu is open |
-| `Tab`, `Enter` | Complete the selected command |
+| `Tab`, `Enter` | Complete the selected command (Tab also cycles the operating mode when the input is empty) |
 
 ### Slash commands
 
@@ -111,6 +111,7 @@ run. `Esc` dismisses the menu.
 | `/autoapprove [on\|off]` | Toggle or set automatic approval |
 | `/mcp [subcommand]` | Manage MCP servers: list/add/remove/reconnect (see below) |
 | `/skills [subcommand]` | Manage the skill system: list/info/use/run (see below) |
+| `/mode [name]` | Switch operating mode, or press Tab to cycle (see Modes below) |
 | `/quit` | Leave Metis |
 
 `/mcp` subcommands:
@@ -136,6 +137,26 @@ The plain REPL supports `/help`, `/status`, `/tools`, `/reset`,
 
 Each prompt keeps the previous turns in the conversation (bounded by
 `--window`), so follow-up questions work. `/reset` starts fresh.
+
+## Modes
+
+Metis can operate in five postures, each of which rewrites the **system prompt**
+sent to the model on every turn (the shared tool list and core rules are
+preserved; a mode-specific section is appended):
+
+| Mode | Posture |
+|---|---|
+| **General** (default) | All-purpose: explore, plan, build, and verify end-to-end. |
+| **Planner** | Analyze and plan only — explore the codebase and propose approaches; does not modify code. |
+| **Builder** | Implement and refine code — edit, create, and verify precisely. |
+| **Debugger** | Diagnose and fix failures — reproduce, isolate the root cause, make the smallest fix. |
+| **Cybersecurity** | Find and harden against vulnerabilities — audit code and report findings with severity and fixes. |
+| **Simplifier** | Reduce complexity without changing behaviour — remove dead code, consolidate duplicates. |
+
+Switch modes with the **Tab** key (when the input is empty) to cycle through
+them, or with `/mode <name>` (`general`, `planner`, `builder`, `debugger`,
+`cybersecurity`, `simplifier`). The active mode is shown in the status bar and
+confirmed as a transcript line on each switch.
 
 ## Approvals
 

@@ -213,10 +213,10 @@ type Config struct {
 
 // Agent holds conversation state across runs.
 type Agent struct {
-	cfg    Config
-	mode   Mode
-	hist   *memory.History
-	mu     sync.Mutex
+	cfg  Config
+	mode Mode
+	hist *memory.History
+	mu   sync.Mutex
 }
 
 func New(cfg Config) *Agent {

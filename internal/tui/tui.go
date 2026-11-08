@@ -48,11 +48,12 @@ type Options struct {
 	// SkillsManager manages the skill system at runtime (/skills command).
 	SkillsManager *skills.Manager
 }
+
 // modes is the ordered list of operating modes the user can switch between
 // with the Tab key. Each entry is a human-friendly label; its index into
 // this slice is the agent.Mode value (0-based).
 var modes = []struct {
-	label      string
+	label string
 	agent.Mode
 }{
 	{"General", agent.ModeGeneral},
@@ -238,8 +239,6 @@ func newModel(a *agent.Agent, opts Options) *Model {
 		m.modeIdx = opts.Mode
 		a.SetMode(modes[opts.Mode].Mode)
 	}
-	m.layout()
-	m.syncViewport(true)
 
 	m.addWelcome()
 	if m.sess != nil && m.agent.HistoryLen() > 0 {
@@ -661,6 +660,27 @@ var slashCommands = []slashCommand{
 	{"/quit", "", "leave Metis"},
 }
 
+// parseModeName maps a mode name to its 0-based index in modes, or -1 if
+// unrecognized.
+func parseModeName(name string) int {
+	switch name {
+	case "general", "g", "":
+		return 0
+	case "planner", "p":
+		return 1
+	case "builder", "b":
+		return 2
+	case "debugger", "debug", "d":
+		return 3
+	case "cybersecurity", "cyber", "security", "sec", "c":
+		return 4
+	case "simplifier", "simple", "simplify", "simpl", "s":
+		return 5
+	default:
+		return -1
+	}
+}
+
 func isExactCommand(text string) bool {
 	for _, c := range slashCommands {
 		if strings.EqualFold(text, c.name) {
@@ -964,6 +984,26 @@ func (m *Model) command(text string) tea.Cmd {
 		m.input.Reset()
 		m.layout()
 		m.syncViewport(true)
+	case "/mode":
+		if len(fields) > 1 {
+			mi := parseModeName(strings.ToLower(fields[1]))
+			if mi < 0 {
+				m.blocks = append(m.blocks, block{
+					kind: blockError,
+					text: fmt.Sprintf("unknown mode %q. Use: general, planner, builder, debugger, cybersecurity, simplifier (or Tab to cycle)", fields[1]),
+				})
+				m.input.Reset()
+				m.layout()
+				m.syncViewport(false)
+				return nil
+			}
+			m.switchMode(mi)
+		} else {
+			m.switchMode(m.modeIdx)
+		}
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
 	case "/mcp":
 		out := "no mcp servers are configured"
 		if m.mgr != nil {
@@ -1106,6 +1146,7 @@ const helpText = `Commands
   /autoapprove [on|off] toggle or set automatic approval
   /mcp [subcommand]  list/add/remove/reconnect MCP servers
   /skills [subcommand]  list/info/use/run skills
+  /mode [name]       switch operating mode (or press Tab to cycle)
   /quit              leave Metis
 
 Type / to open the command menu; use ↑/↓ to choose and Tab or Enter to
@@ -1113,6 +1154,8 @@ complete. Esc dismisses the menu.
 
 Keys
   Enter              send the message
+  Tab                cycle the operating mode (General, Planner, Builder,
+                    Debugger, Cybersecurity, Simplifier)
   Alt+Enter / Ctrl+J insert a newline
   Ctrl+P / Ctrl+N    previous / next input in history
   PgUp / PgDn        scroll the transcript (mouse wheel works too)
@@ -1431,7 +1474,7 @@ func (m *Model) statusView() string {
 	default:
 		modeLabel := modes[m.modeIdx].label
 		left = styleOK.Render("●") + " " + styleStatus.Render("ready") + "  " +
-			styleStatusOn.Render("· " + modeLabel)
+			styleStatusOn.Render("· "+modeLabel)
 		if m.step > 0 {
 			steps := "steps"
 			if m.step == 1 {
@@ -1451,7 +1494,7 @@ func (m *Model) inputView() string {
 }
 
 func (m *Model) footerView() string {
-	hint := "enter send  ·  alt+enter newline  ·  ctrl+o tools  ·  /help  ·  ctrl+c quit"
+	hint := "enter send  ·  tab mode  ·  alt+enter newline  ·  /help  ·  ctrl+c quit"
 	if m.pendingApproval != nil {
 		hint = "y allow once  ·  a always allow tool  ·  A auto-approve all  ·  n deny  ·  esc cancel"
 	} else if m.running {

@@ -176,6 +176,26 @@ Key flags (defaults): `--temp 0.3`, `--max-steps 40`, `--window 64`,
 `EventToolResult`, `EventDone`, `EventError`. Each carries `Step`, `Text`,
 `Tool`, `Args`, `Result`, `Err`, `Duration`.
 
+### Operating modes
+
+`Mode` (see `internal/agent/agent.go`) is the agent's operating posture. Each
+mode appends a **mode-specific section** to the shared base system prompt
+(`baseSystemPrompt`) — the base prompt (tool list, skill workflow, and rules)
+is identical across modes. Modes are: `ModeGeneral` (default), `ModePlanner`,
+`ModeBuilder`, `ModeDebugger`, `ModeCybersecurity`, `ModeSimplifier`.
+
+- `Agent.System()` and `Agent.buildMessages()` use
+  `buildSystemPrompt(cfg.System, modeSection())`.
+- `SetMode(m Mode)` mutates `a.mode` under `a.mu`. **It must not be called
+  while `Run` is executing** (the lock is held for the whole run), or it
+  deadlocks. The TUI only switches modes when `m.running` is false.
+- Out-of-range modes clamp to `ModeGeneral` (in `New` and `SetMode`).
+- Helpers: `ModeName(m)` (e.g. "Builder") and `ModeDescription(m)` (one-liner)
+  for UI display.
+- The TUI (`internal/tui/tui.go`) exposes mode switching via the **Tab** key
+  (when the input is empty) and the `/mode [name]` command; the active mode is
+  shown in the status bar and footer.
+
 ---
 
 ## 5. Memory / history (`internal/memory/history.go`)
