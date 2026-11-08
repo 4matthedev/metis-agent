@@ -13,7 +13,7 @@ reverse-engineering the project from scratch.
 
 ## 1. What this project is
 
-**metis-agent** is a local-first coding agent written in **Go 1.24+**. It talks
+**metis-agent** is a local-first coding agent written in **Go 1.25+**. It talks
 to any **OpenAI-compatible chat server** (llama-prism, LM Studio, Ollama, OpenAI,
 OpenRouter, Groq, Together, or any `--base-url`) via `/v1/chat/completions`,
 with **streaming (SSE)** and **tool calling**. Given a task, it explores a project,
@@ -602,11 +602,15 @@ Layout it creates:
 
 | Path | Purpose |
 |---|---|
-| `$XDG_DATA_HOME/metis-agent/bin/metis-agent` (default `~/.local/share/...`) | real binary |
+| `$XDG_DATA_HOME/metis-agent/bin/metis-agent` (default `~/.local/share/...`) | real binary (macOS: `~/Library/Application Support/metis-agent`) |
 | `$PREFIX/bin/metis-agent` (default `~/.local/bin/...`) | generated launcher; starts the backend on demand |
 | `$PREFIX/bin/Metis-Agent` | capitalized alias (case-sensitive filesystems) |
-| `$XDG_CONFIG_HOME/metis-agent/config.json` | global config |
+| `$XDG_CONFIG_HOME/metis-agent/config.json` (macOS: `~/Library/Application Support/metis-agent/config.json`) | global config |
 | `$XDG_DATA_HOME/metis-agent/backend.log` | backend stdout/stderr |
+
+The paths must match `internal/config`: Linux honours `XDG_CONFIG_HOME` and
+`XDG_DATA_HOME`; macOS uses `~/Library/Application Support/metis-agent` for
+both because `os.UserConfigDir` ignores XDG there.
 
 **Release asset naming is a contract.** `scripts/install.sh` downloads:
 

@@ -181,8 +181,17 @@ esac
 
 [ -n "$PREFIX" ] || PREFIX="$HOME/.local"
 BIN_DIR="$PREFIX/bin"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/metis-agent"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/metis-agent"
+# Match internal/config: os.UserConfigDir on macOS is ~/Library/Application
+# Support (XDG is ignored), and DataDir is the same directory there. On Linux,
+# honour XDG_CONFIG_HOME and XDG_DATA_HOME.
+if [ "$OS" = "darwin" ]; then
+  APP_SUPPORT="$HOME/Library/Application Support"
+  DATA_DIR="$APP_SUPPORT/metis-agent"
+  CONFIG_DIR="$APP_SUPPORT/metis-agent"
+else
+  DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/metis-agent"
+  CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/metis-agent"
+fi
 CONFIG_FILE="$CONFIG_DIR/config.json"
 LOG_FILE="$DATA_DIR/backend.log"
 WRAPPER="$BIN_DIR/metis-agent"

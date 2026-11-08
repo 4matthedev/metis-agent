@@ -65,9 +65,9 @@ The installer writes:
 
 | Path | Purpose |
 |---|---|
-| `~/.local/share/metis-agent/bin/metis-agent` | the binary |
+| `~/.local/share/metis-agent/bin/metis-agent` | the binary (Linux; `~/Library/Application Support/metis-agent` on macOS) |
 | `~/.local/bin/metis-agent` (and `Metis-Agent`) | launcher that starts the backend on demand |
-| `~/.config/metis-agent/config.json` | provider, endpoint, and model |
+| `~/.config/metis-agent/config.json` (Linux) / `~/Library/Application Support/metis-agent/config.json` (macOS) | provider, endpoint, and model |
 | `~/.local/share/metis-agent/backend.log` | backend logs |
 
 It also adds `~/.local/bin` to `PATH` in your shell rc file on first run, so
@@ -79,12 +79,13 @@ block from your shell rc:
 
 ```sh
 rm -rf ~/.local/share/metis-agent ~/.config/metis-agent \
+       ~/Library/Application\ Support/metis-agent \
        ~/.local/bin/metis-agent ~/.local/bin/Metis-Agent
 ```
 
 ## Requirements
 
-- Go 1.24+ (only when building from source; the installer downloads a release)
+- Go 1.25+ (only when building from source; the installer downloads a release)
 - A running OpenAI-compatible model server with streaming tool/function calling:
   - llama-prism (`http://127.0.0.1:9931`), LM Studio (`:1234`), or Ollama (`:11434`)
   - or a hosted provider such as OpenAI, OpenRouter, Groq, or Together
