@@ -759,6 +759,22 @@ ensure_path() {
     fi
     if [ "$DRY_RUN" -eq 1 ]; then ok "would create $HOME/.profile"; else ok "created $HOME/.profile"; fi
   fi
+
+  # Fish does not read the POSIX rc files.
+  local fish_dir="$HOME/.config/fish"
+  if [ -d "$fish_dir" ]; then
+    local fishrc="$fish_dir/config.fish"
+    if ! grep -q "metis-agent installer" "$fishrc" 2>/dev/null; then
+      if [ "$DRY_RUN" -eq 0 ]; then
+        {
+          printf '\n# Added by metis-agent installer\n'
+          printf 'fish_add_path %s\n' "$BIN_DIR"
+        } >>"$fishrc"
+      fi
+      if [ "$DRY_RUN" -eq 1 ]; then ok "would update $fishrc"; else ok "updated $fishrc"; fi
+    fi
+  fi
+
   warn "open a new terminal (or run: export PATH=\"${BIN_DIR}:\$PATH\")"
 }
 
