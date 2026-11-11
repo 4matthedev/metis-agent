@@ -1,4 +1,9 @@
-# metis-agent
+███╗   ███╗███████╗████████╗██╗███████╗
+████╗ ████║██╔════╝╚══██╔══╝██║██╔════╝
+██╔████╔██║█████╗     ██║   ██║███████╗
+██║╚██╔╝██║██╔══╝     ██║   ██║╚════██║
+██║ ╚═╝ ██║███████╗   ██║   ██║███████║
+╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝╚══════╝
 
 metis-agent is a Go coding agent for local and hosted OpenAI-compatible model
 servers (llama-prism, LM Studio, Ollama, OpenAI, OpenRouter, Groq, Together,
