@@ -60,7 +60,7 @@ type Options struct {
 	SetModel   func(string) error
 	ModelName  func() string
 	// SetThinking and ThinkingLevel power runtime thinking-level switching.
-	SetThinking func(llm.ThinkingLevel) error
+	SetThinking   func(llm.ThinkingLevel) error
 	ThinkingLevel func() llm.ThinkingLevel
 }
 
@@ -388,14 +388,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Tab cycles the operating mode. When a slash suggestion menu is open,
 	// Tab is used to complete the suggestion, so we only cycle modes when no
 	// suggestion menu is active and the input is empty.
-	if msg.String() == "tab" && m.input.Value() == "" && m.suggestions() == nil {
+	if msg.String() == "tab" && m.input.Value() == "" && len(m.suggestions()) == 0 {
 		if !m.running {
 			m.cycleMode()
 		}
 		return m, nil
 	}
 	// Shift+Tab cycles the thinking level.
-	if msg.String() == "shift+tab" && m.input.Value() == "" && m.suggestions() == nil {
+	if msg.String() == "shift+tab" && m.input.Value() == "" && len(m.suggestions()) == 0 {
 		if !m.running {
 			m.cycleThinking()
 		}
@@ -562,7 +562,7 @@ func (m *Model) cycleMode() {
 }
 
 func (m *Model) cycleThinking() {
-	if m.opts.SetThinking == nil {
+	if m.opts.SetThinking == nil || m.opts.ThinkingLevel == nil {
 		return
 	}
 	cur := m.opts.ThinkingLevel()
@@ -575,7 +575,7 @@ func (m *Model) cycleThinking() {
 			break
 		}
 	}
-	next := levels[(idx+1) % len(levels)]
+	next := levels[(idx+1)%len(levels)]
 	if err := m.opts.SetThinking(next); err != nil {
 		return
 	}

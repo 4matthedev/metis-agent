@@ -39,15 +39,28 @@ type Client struct {
 	http    *http.Client
 }
 
-// NewClient builds an embeddings client. baseURL is the provider root without
-// /v1 (for example http://127.0.0.1:11434).
+// NewClient builds an embeddings client. baseURL may be a provider root, a
+// URL already ending in /v1, or a full chat endpoint; the standard
+// /v1/embeddings path is appended exactly once.
 func NewClient(baseURL, apiKey, model string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		baseURL: normalizeBaseURL(baseURL),
 		apiKey:  apiKey,
 		model:   model,
 		http:    &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+func normalizeBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	for _, suffix := range []string{"/v1/chat/completions", "/chat/completions", "/v1/embeddings", "/v1/models"} {
+		if strings.HasSuffix(base, suffix) {
+			base = strings.TrimSuffix(base, suffix)
+			break
+		}
+	}
+	base = strings.TrimSuffix(base, "/v1")
+	return strings.TrimRight(base, "/")
 }
 
 // Model reports the embedding model name.
@@ -175,15 +188,15 @@ func NewIndex(root, model string, embedder Embedder, cacheDir string) *Index {
 func (ix *Index) Ensure(ctx context.Context, rebuild bool) (int, error) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	if ix.built && !rebuild {
-		return len(ix.chunks), nil
-	}
 
 	files, err := collectFiles(ix.root, ix.maxFiles)
 	if err != nil {
 		return 0, err
 	}
 	fp := fingerprint(files)
+	if ix.built && !rebuild && fp == ix.builtFP {
+		return len(ix.chunks), nil
+	}
 	if !rebuild {
 		if chunks, ok := ix.loadCache(fp); ok {
 			ix.chunks, ix.built, ix.builtFP = chunks, true, fp

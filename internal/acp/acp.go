@@ -71,6 +71,7 @@ type session struct {
 	mu            sync.Mutex
 	running       bool
 	cancel        context.CancelFunc
+	done          chan struct{}
 	currentToolID string
 	toolIDs       []string
 }
@@ -332,15 +333,19 @@ func (s *Server) prompt(params json.RawMessage) (json.RawMessage, *rpcError) {
 		return nil, &rpcError{Code: -32000, Message: "the session is already running a prompt"}
 	}
 	runCtx, cancel := context.WithCancel(s.ctx)
+	done := make(chan struct{})
 	sess.running = true
 	sess.cancel = cancel
+	sess.done = done
 	sess.mu.Unlock()
 	defer func() {
 		cancel()
 		sess.mu.Lock()
 		sess.running = false
 		sess.cancel = nil
+		sess.done = nil
 		sess.mu.Unlock()
+		close(done)
 	}()
 
 	msgID := randomID("msg_")
@@ -395,10 +400,16 @@ func (s *Server) closeSession(params json.RawMessage) (json.RawMessage, *rpcErro
 	s.mu.Unlock()
 	if sess != nil {
 		sess.mu.Lock()
-		if sess.cancel != nil {
-			sess.cancel()
-		}
+		cancel := sess.cancel
+		done := sess.done
 		sess.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		// Wait for an in-flight prompt before releasing the agent's resources.
+		if done != nil {
+			<-done
+		}
 		if sess.cleanup != nil {
 			sess.cleanup()
 		}
@@ -604,6 +615,9 @@ func (s *Server) write(msg message) error {
 }
 
 func (s *Server) writeError(id json.RawMessage, code int, text string) {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
 	_ = s.write(message{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: text}})
 }
 

@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,7 +40,7 @@ var slashCommands = []slashCommand{
 	{"/approve-edits", "[on|off]", "review file edits with a diff before writing"},
 	{"/model", "[name]", "list models or switch the active model"},
 	{"/thinking", "[level]", "list thinking levels or set reasoning effort"},
-	{"/theme", "[auto|dark|light]", "switch the color palette (auto = detect terminal)"},
+	{"/theme", "[auto|dark|light]", "switch the syntax-highlighting palette"},
 	{"/compact", "", "summarize the conversation to free context"},
 	{"/context", "", "show context usage"},
 	{"/undo", "", "restore files changed by the previous turn"},
@@ -46,6 +48,7 @@ var slashCommands = []slashCommand{
 	{"/mcp", "[list|add|remove|reconnect]", "manage MCP servers"},
 	{"/mode", "[name]", "switch operating mode (general/planner/builder/debugger/cybersecurity/simplifier); press Tab to cycle"},
 	{"/skills", "[list|info|use|run]", "manage the skill system"},
+	{"/copy", "", "copy the last assistant message to the clipboard"},
 	{"/quit", "", "leave Metis"},
 }
 
@@ -433,8 +436,10 @@ func (m *Model) command(text string) tea.Cmd {
 	case "/thinking":
 		if len(fields) > 1 {
 			level := strings.TrimSpace(fields[1])
-			parsed, _ := llm.ParseThinkingLevel(level)
-			if m.opts.SetThinking == nil {
+			parsed, perr := llm.ParseThinkingLevel(level)
+			if perr != nil {
+				m.blocks = append(m.blocks, block{kind: blockError, text: perr.Error()})
+			} else if m.opts.SetThinking == nil {
 				m.blocks = append(m.blocks, block{kind: blockError, text: "thinking level switching is not available"})
 			} else if err := m.opts.SetThinking(parsed); err != nil {
 				m.blocks = append(m.blocks, block{kind: blockError, text: "thinking: " + err.Error()})
@@ -448,6 +453,13 @@ func (m *Model) command(text string) tea.Cmd {
 			return nil
 		}
 		// No argument: show current and available levels.
+		if m.opts.ThinkingLevel == nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "thinking level switching is not available"})
+			m.input.Reset()
+			m.layout()
+			m.syncViewport(false)
+			return nil
+		}
 		cur := m.opts.ThinkingLevel()
 		var b strings.Builder
 		fmt.Fprintf(&b, "current thinking: %s\navailable:  ", cur.String())
@@ -459,52 +471,61 @@ func (m *Model) command(text string) tea.Cmd {
 			}
 		}
 		fmt.Fprintf(&b, "(none = server default)")
-			b.WriteString("\nchange with /thinking <level>")
-			m.blocks = append(m.blocks, block{kind: blockSystem, text: b.String()})
-			m.input.Reset()
-			m.layout()
-			m.syncViewport(false)
-			return nil
-		case "/theme":
-			if len(fields) > 1 {
-				mode := strings.ToLower(strings.TrimSpace(fields[1]))
-				valid := map[string]bool{"auto": true, "dark": true, "light": true}
-				if !valid[mode] {
-					m.blocks = append(m.blocks, block{kind: blockError, text: "usage: /theme [auto|dark|light]"})
-					m.input.Reset()
-					m.layout()
-					m.syncViewport(false)
-					return nil
-				}
-				SetTheme(mode)
-				m.opts.Theme = mode
-			m.opts.Highlight = (mode != "off")
-				m.blocks = append(m.blocks, block{kind: blockSystem, text: "theme: " + mode})
+		b.WriteString("\nchange with /thinking <level>")
+		m.blocks = append(m.blocks, block{kind: blockSystem, text: b.String()})
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+		return nil
+	case "/theme":
+		if len(fields) > 1 {
+			mode := strings.ToLower(strings.TrimSpace(fields[1]))
+			valid := map[string]bool{"auto": true, "dark": true, "light": true}
+			if !valid[mode] {
+				m.blocks = append(m.blocks, block{kind: blockError, text: "usage: /theme [auto|dark|light]"})
 				m.input.Reset()
 				m.layout()
 				m.syncViewport(false)
 				return nil
 			}
-			cur := m.opts.Theme
-			blocks := "auto|dark|light"
-			switch cur {
-			case "auto":
-				blocks = "*auto|dark|light"
-			case "dark":
-				blocks = "auto|*dark|light"
-			default:
-				blocks = "auto|dark|*light"
+			SetTheme(mode)
+			m.opts.Theme = mode
+			m.opts.Highlight = true
+			// Cached tool previews were highlighted with the old background.
+			for i := range m.blocks {
+				m.blocks[i].cacheKey = ""
 			}
-			msg := fmt.Sprintf("current theme: %s (%s)\nchange with /theme [auto|dark|light]", cur, blocks)
-			m.blocks = append(m.blocks, block{kind: blockSystem, text: msg})
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: "syntax theme: " + mode})
 			m.input.Reset()
 			m.layout()
 			m.syncViewport(false)
 			return nil
-		case "/compact":
-			if m.running {
-				return nil
-			}
+		}
+		cur := m.opts.Theme
+		if cur == "" {
+			cur = "auto"
+		}
+		choices := "auto|dark|light"
+		switch cur {
+		case "auto":
+			choices = "*auto|dark|light"
+		case "dark":
+			choices = "auto|*dark|light"
+		case "off":
+			choices = "off (syntax highlighting is disabled)"
+		default:
+			choices = "auto|dark|*light"
+		}
+		msg := fmt.Sprintf("current syntax theme: %s (%s)\nchange with /theme [auto|dark|light]", cur, choices)
+		m.blocks = append(m.blocks, block{kind: blockSystem, text: msg})
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+		return nil
+	case "/compact":
+		if m.running {
+			return nil
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancel = cancel
 		m.running = true
@@ -530,6 +551,19 @@ func (m *Model) command(text string) tea.Cmd {
 		m.input.Reset()
 		m.layout()
 		m.syncViewport(false)
+	case "/copy":
+		text := m.lastAssistantText()
+		if text == "" {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "no assistant message to copy"})
+		} else if err := copyToClipboard(text); err != nil {
+			m.blocks = append(m.blocks, block{kind: blockError, text: "copy: " + err.Error()})
+		} else {
+			m.blocks = append(m.blocks, block{kind: blockSystem, text: "copied the last assistant message"})
+		}
+		m.input.Reset()
+		m.layout()
+		m.syncViewport(false)
+		return nil
 	case "/undo":
 		if m.opts.Undo == nil {
 			m.blocks = append(m.blocks, block{kind: blockError, text: "undo is not available"})
@@ -662,13 +696,14 @@ const helpText = `Commands
   /approve-edits [on|off] review file edits with a diff first
   /model [name]      list models or switch the active model
   /thinking [level]  list thinking levels or set reasoning effort
-  /theme [auto|dark|light]  switch the color palette
+  /theme [auto|dark|light]  switch the syntax-highlighting palette
   /compact           summarize the conversation to free context
   /context           show context usage
   /undo              restore files changed by the previous turn
   /commit [message]  stage everything and commit (generates a message)
   /mcp [subcommand]  list/add/remove/reconnect MCP servers
   /skills [subcommand]  list/info/use/run skills
+  /copy              copy the last assistant message to the clipboard
   /mode [name]       switch operating mode (or press Tab to cycle)
   /quit              leave Metis
 
@@ -679,7 +714,7 @@ Keys
   Enter              send the message
   Tab                cycle the operating mode (General, Planner, Builder,
                     Debugger, Cybersecurity, Simplifier)
-  Shift+Tab          cycle the thinking level (off, low, medium, high, xhigh)
+  Shift+Tab          cycle the thinking level (none, low, medium, high, xhigh)
   Alt+Enter / Ctrl+J insert a newline
   Ctrl+P / Ctrl+N    previous / next input in history
   PgUp / PgDn        scroll the transcript (mouse wheel works too)
@@ -697,3 +732,51 @@ Approval
   a                  always allow this tool for the session
   A                  auto-approve every dangerous call for the session
   n / Esc            deny the call and cancel the step`
+
+// lastAssistantText returns the most recent completed or streaming assistant
+// message.
+func (m *Model) lastAssistantText() string {
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].kind == blockAssistant {
+			return m.blocks[i].text
+		}
+	}
+	return ""
+}
+
+// copyToClipboard writes text to the platform clipboard, trying the usual
+// Wayland, X11, macOS, and Windows helpers in order.
+func copyToClipboard(text string) error {
+	candidates := [][]string{
+		{"wl-copy"},
+		{"xclip", "-selection", "clipboard"},
+		{"xsel", "--clipboard", "--input"},
+		{"pbcopy"},
+		{"clip"},
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = [][]string{{"pbcopy"}}
+	case "windows":
+		candidates = [][]string{{"clip"}}
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate[0])
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cmd := exec.Command(path, candidate[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no clipboard utility found")
+	}
+	return lastErr
+}

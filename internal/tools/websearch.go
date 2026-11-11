@@ -42,11 +42,18 @@ func NewWebSearchTool() *Tool {
 			defer cancel()
 
 			var lastErr error
-			for _, endpoint := range []string{
-				"https://html.duckduckgo.com/html/?q=" + url.QueryEscape(q),
-				"https://lite.duckduckgo.com/lite/?q=" + url.QueryEscape(q),
-			} {
-				results, err := fetchSearchResults(searchCtx, endpoint, limit)
+			encoded := url.QueryEscape(q)
+			attempts := []struct {
+				endpoint string
+				form     bool
+			}{
+				{"https://html.duckduckgo.com/html/", true},
+				{"https://html.duckduckgo.com/html/?q=" + encoded, false},
+				{"https://lite.duckduckgo.com/lite/", true},
+				{"https://lite.duckduckgo.com/lite/?q=" + encoded, false},
+			}
+			for _, attempt := range attempts {
+				results, err := fetchSearchResults(searchCtx, attempt.endpoint, q, attempt.form, limit)
 				if err != nil {
 					lastErr = err
 					continue
@@ -69,10 +76,19 @@ type searchResult struct {
 	Snippet string
 }
 
-func fetchSearchResults(ctx context.Context, endpoint string, limit int) ([]searchResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func fetchSearchResults(ctx context.Context, endpoint, query string, form bool, limit int) ([]searchResult, error) {
+	method := http.MethodGet
+	var body io.Reader
+	if form {
+		method = http.MethodPost
+		body = strings.NewReader(url.Values{"q": {query}}.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
+	}
+	if form {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) metis-agent")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
@@ -85,11 +101,11 @@ func fetchSearchResults(ctx context.Context, endpoint string, limit int) ([]sear
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("search server returned %s", resp.Status)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return nil, err
 	}
-	return parseSearchHTML(string(body), limit), nil
+	return parseSearchHTML(string(bodyBytes), limit), nil
 }
 
 // parseSearchHTML accepts both DuckDuckGo result layouts.

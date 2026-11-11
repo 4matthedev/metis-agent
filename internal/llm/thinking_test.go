@@ -12,7 +12,7 @@ func TestCompleteSendsReasoningEffort(t *testing.T) {
 	var gotReasoning string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Model         string
+			Model           string
 			ReasoningEffort string `json:"reasoning_effort"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)

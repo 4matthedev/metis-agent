@@ -11,7 +11,7 @@ import (
 func TestRouterFallsBackAndSwitches(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body struct {
-			Model string `json:"model"`
+			Model         string `json:"model"`
 			ThinkingLevel string `json:"reasoning_effort"`
 		}
 		_ = json.NewDecoder(req.Body).Decode(&body)

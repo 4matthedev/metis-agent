@@ -174,10 +174,12 @@ run. `Esc` dismisses the menu.
 | `/approve-edits [on\|off]` | Review in-project file edits with a diff before writing |
 | `/model [name]` | List available models or switch the active model |
 | `/thinking [level]` | Set reasoning effort (`none`/`low`/`medium`/`high`/`xhigh`) |
+| `/theme [auto\|dark\|light]` | Switch the syntax-highlighting palette |
 | `/compact` | Summarize the conversation and free context |
 | `/context` | Show message and approximate token usage |
 | `/undo` | Restore files changed by the previous turn |
 | `/commit [message]` | Stage everything and commit (generates a message) |
+| `/copy` | Copy the last assistant message to the clipboard |
 | `/mcp [subcommand]` | Manage MCP servers: list/add/remove/reconnect (see below) |
 | `/skills [subcommand]` | Manage the skill system: list/info/use/run (see below) |
 | `/mode [name]` | Switch operating mode, or press Tab to cycle (see Modes below) |

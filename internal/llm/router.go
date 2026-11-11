@@ -58,11 +58,25 @@ func (r *Router) clientFor(model string) (*Client, error) {
 	})
 }
 
-// SetThinking changes the reasoning effort for all subsequent requests.
+// SetThinking changes the reasoning effort for all subsequent requests. The
+// active client is rebuilt because the effort is stored on the client and sent
+// with each completion; only updating the router field would leave the running
+// client on the old level.
 func (r *Router) SetThinking(l ThinkingLevel) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.thinking = l
-	r.mu.Unlock()
+	client, err := NewClientWithOptions(ClientOptions{
+		Provider: r.provider,
+		BaseURL:  r.baseURL,
+		Model:    r.model,
+		APIKey:   r.apiKey,
+		Temp:     r.temp,
+		Thinking: l,
+	})
+	if err == nil {
+		r.client = client
+	}
 }
 
 // Thinking returns the current reasoning effort.

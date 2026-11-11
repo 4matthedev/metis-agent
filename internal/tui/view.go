@@ -166,8 +166,8 @@ func (m *Model) statusView() string {
 	case m.running:
 		left = m.spinner.View() + " " + styleStatusOn.Render(m.status)
 		modeLabel := modes[m.modeIdx].label
-		thinking := "off"
-		if m.opts.SetThinking != nil {
+		thinking := "none"
+		if m.opts.SetThinking != nil && m.opts.ThinkingLevel != nil {
 			thinking = m.opts.ThinkingLevel().String()
 		}
 		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  %s  ·  %s  ·  esc cancel",
@@ -181,8 +181,8 @@ func (m *Model) statusView() string {
 		left = styleDim.Render("○ cancelled")
 	default:
 		modeLabel := modes[m.modeIdx].label
-		thinking := "off"
-		if m.opts.SetThinking != nil {
+		thinking := "none"
+		if m.opts.SetThinking != nil && m.opts.ThinkingLevel != nil {
 			thinking = m.opts.ThinkingLevel().String()
 		}
 		left = styleOK.Render("●") + " " + styleStatus.Render("ready") + "  " +

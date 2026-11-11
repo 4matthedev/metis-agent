@@ -36,7 +36,13 @@ func NewSemanticSearchTool(workDir string, ix *embeddings.Index) *Tool {
 					return "", err
 				}
 				rel, err := filepath.Rel(workDir, abs)
-				if err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+				if err != nil {
+					return "", err
+				}
+				if rel != "." {
+					if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						return "", fmt.Errorf("semantic_search path %q is outside the project", raw)
+					}
 					prefix = filepath.ToSlash(rel)
 				}
 			}

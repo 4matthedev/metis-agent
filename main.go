@@ -525,6 +525,7 @@ func main() {
 			Tools:           toolNames,
 			Highlight:       v.Highlight != "off",
 			Theme:           v.Highlight,
+			Thinking:        v.Thinking,
 			AutoApprove:     v.AutoApprove,
 			SessionsEnabled: store != nil && sess != nil,
 			Store:           store,
@@ -544,6 +545,11 @@ func main() {
 				return nil
 			},
 			ModelName: router.Model,
+			SetThinking: func(l llm.ThinkingLevel) error {
+				router.SetThinking(l)
+				return nil
+			},
+			ThinkingLevel: router.Thinking,
 		}
 		if sess != nil && store != nil {
 			opts.SessionID = sess.ID
@@ -912,15 +918,24 @@ func runREPL(ctx context.Context, a *agent.Agent, opts replOptions) {
 						fmt.Fprintln(os.Stderr, "thinking level switching is not available")
 						continue
 					}
-					lvl, _ := llm.ParseThinkingLevel(fields[1])
-                    opts.Router.SetThinking(lvl)
-                    fmt.Fprintf(os.Stderr, "thinking: %s\n", lvl.String())
-                    continue
+					lvl, err := llm.ParseThinkingLevel(fields[1])
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "thinking: %v\n", err)
+						continue
+					}
+					opts.Router.SetThinking(lvl)
+					fmt.Fprintf(os.Stderr, "thinking: %s\n", lvl.String())
+					continue
 				}
-				fmt.Fprintf(os.Stderr, "current thinking: %s\n", opts.Router.Thinking().String())
+				if opts.Router == nil {
+					fmt.Fprintln(os.Stderr, "thinking level switching is not available")
+					continue
+				}
+				current := opts.Router.Thinking()
+				fmt.Fprintf(os.Stderr, "current thinking: %s\n", current.String())
 				fmt.Fprint(os.Stderr, "available:  ")
 				for i, l := range llm.Levels() {
-					if l == opts.Router.Thinking() {
+					if l == current {
 						fmt.Fprintf(os.Stderr, "*%s ", l.String())
 					} else {
 						fmt.Fprintf(os.Stderr, "%s ", l.String())

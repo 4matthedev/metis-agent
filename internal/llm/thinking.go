@@ -7,7 +7,10 @@
 
 package llm
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ThinkingLevel is a user-facing knob for how much the model may "think"
 // (reason internally) before answering. The exact token budget is a server
@@ -33,11 +36,10 @@ const (
 )
 
 // ParseThinkingLevel converts a user-supplied string into a ThinkingLevel.
-// Returns (level, err). Empty/unknown input yields ThinkingNone with a nil
-// error (we treat unknowns as "don't send it" rather than failing, because
-// the user might pass a free-form value their server happens to understand).
+// Empty input yields ThinkingNone. Unknown input returns an error so a typo
+// does not silently turn reasoning off.
 func ParseThinkingLevel(s string) (ThinkingLevel, error) {
-	s = strings.TrimSpace(s)
+	s = strings.TrimSpace(strings.ToLower(s))
 	switch s {
 	case "", "none", "off", "0":
 		return ThinkingNone, nil
@@ -50,9 +52,7 @@ func ParseThinkingLevel(s string) (ThinkingLevel, error) {
 	case "xhigh", "4", "max":
 		return ThinkingXHigh, nil
 	}
-	// Unknown value: treat as "none" rather than erroring, so the request still
-	// goes out. The user can check /thinking to see the current setting.
-	return ThinkingNone, nil
+	return ThinkingNone, fmt.Errorf("thinking must be none, low, medium, high, or xhigh (got %q)", s)
 }
 
 // ReasoningEffort returns the JSON key value to include in the request, or

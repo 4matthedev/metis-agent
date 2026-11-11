@@ -85,14 +85,26 @@ func NewDiagnosticsTool(workDir string) *Tool {
 				cmd.Stdout = &out
 				cmd.Stderr = &out
 				err := cmd.Run()
+				timedOut := runCtx.Err() == context.DeadlineExceeded
 				cancel()
+
+				// Some checks report findings on stdout and still exit 0. The
+				// clearest case is `gofmt -l`, which lists files that need
+				// formatting; non-empty output means the check failed even
+				// though the process exited successfully.
+				listMode := c.Name == "gofmt" && hasFlag(c.Args, "-l")
+				if err == nil && listMode && strings.TrimSpace(out.String()) != "" {
+					err = fmt.Errorf("files need formatting")
+				}
 
 				status := "ok"
 				if err != nil {
 					status = "FAILED"
 					failures++
-					if runCtx.Err() == context.DeadlineExceeded {
+					if timedOut {
 						status = fmt.Sprintf("FAILED (timed out after %ds)", timeoutSec)
+					} else if listMode {
+						status = "FAILED (files need formatting)"
 					}
 				}
 				fmt.Fprintf(&b, "$ %s\n[%s]\n", label, status)
@@ -114,6 +126,16 @@ func NewDiagnosticsTool(workDir string) *Tool {
 			return strings.TrimRight(b.String(), "\n"), nil
 		},
 	}
+}
+
+// hasFlag reports whether args contains flag.
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
 }
 
 // detectDiagnostics picks checks that are available and appropriate.

@@ -365,6 +365,9 @@ func (v Values) Validate() error {
 	default:
 		return fmt.Errorf("highlight must be auto, dark, light, or off")
 	}
+	if _, err := llm.ParseThinkingLevel(v.Thinking); err != nil {
+		return err
+	}
 	return nil
 }
 
