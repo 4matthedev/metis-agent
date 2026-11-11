@@ -213,8 +213,10 @@ documents the available knobs. `instructions` entries may be absolute or
 relative to `--dir`; they are loaded after the conventional global and project
 files. `thinking` maps to `llm.ThinkingLevel` and is sent to the provider as
 `reasoning_effort` in each chat completion; empty/`none` omits the field so the
-server uses its own default. `embedding_model` enables the `semantic_search`
-tool; an empty value keeps it out of the tool list entirely.
+server uses its own default. It is **validated** by `Values.Validate()` via
+`ParseThinkingLevel`, so a typo in the config or `--thinking` flag fails fast
+rather than silently sending `none`. `embedding_model` enables the
+`semantic_search` tool; an empty value keeps it out of the tool list entirely.
 
 ---
 
@@ -287,6 +289,30 @@ is identical across modes. Modes are: `ModeGeneral` (default), `ModePlanner`,
   (model/update), `commands.go` (slash commands), `sessions.go`, `approvals.go`,
   `view.go`, plus the rendering helpers (`styles.go`, `markdown.go`, `diff.go`).
 
+### Thinking level (reasoning effort)
+
+Independent of operating modes, the agent carries a **thinking level**
+(`none`, `low`, `medium`, `high`, `xhigh`) that is sent to the provider as
+`reasoning_effort` on every chat completion. It is the knob for how much the
+model "thinks" before answering; servers that don't understand the parameter
+(older Ollama, local llama.cpp) ignore it, so `none` (the default) is safe for
+local servers.
+
+- `ParseThinkingLevel` (`internal/llm/thinking.go`) accepts `none`/`off`/`0`,
+  `low`/`1`, `medium`/`2`, `high`/`3`, and `xhigh`/`4`/`max`. **Unknown input
+  returns an error** so a typo surfaces instead of silently turning reasoning
+  off (this was previously a silent `none`). A `ValidThinkingLevel` helper
+  wraps it for config validation.
+- `Router.SetThinking` rebuilds the active client under the router lock, because
+  the effort is stored on the `Client` and sent with each completion; mutating
+  only the router field would leave the running client on the old level.
+- The TUI exposes it via the **Shift+Tab** key (cycles when input is empty, no
+  slash menu open, and not running) and the `/thinking [level]` command; the
+  current level is shown in the status bar (dimmed) and the footer. `Values`
+  exposes `SetThinking`/`ThinkingLevel` on `tui.Model` options.
+- Config validates it: `Values.Validate()` calls `ParseThinkingLevel` and fails
+  on a bad `thinking` value.
+
 ---
 
 ## 5. Memory / history (`internal/memory/history.go`)
@@ -340,15 +366,33 @@ Registered in `registry.go` in groups:
 - **Time:** `time`
 
 `web_search` scrapes DuckDuckGo's HTML endpoints, so it needs no API key; it is
-read-only and not approval-gated. `semantic_search` chunks text files (60-line
-windows, 8-line overlap, ignored build/VCS directories, 512 KB per-file cap),
-embeds them through `/v1/embeddings`, and ranks chunks with cosine similarity.
-The cache is invalidated by a file size/mtime fingerprint; `rebuild=true`
-forces a refresh. `subagent` runs a fresh `agent.Agent` against
+read-only and not approval-gated. It tries several endpoints in order (a
+DuckDuckGo `html`/`lite` page as a `POST` form, then the same pages as `GET`
+with the query pre-encoded) and uses the first that yields results, so one
+blocked endpoint doesn't kill a search.
+
+`semantic_search` chunks text files (60-line windows, 8-line overlap, build/VCS
+directories ignored, 512 KB per-file cap), embeds them through `/v1/embeddings`,
+and ranks chunks with cosine similarity. The embeddings client
+(`internal/embeddings`) normalizes the base URL — it accepts a provider root,
+a URL already ending in `/v1`, or even a full chat endpoint, and appends
+`/v1/embeddings` exactly once — so it works with any provider that exposes that
+path. The index is keyed by a file-size/mtime fingerprint and the cached index is
+reused only when the fingerprint matches; `rebuild=true` forces a refresh.
+A search path that resolves outside the project (a `..` escape) is rejected
+with an error rather than silently searching the wrong tree.
+
+`subagent` runs a fresh `agent.Agent` against
 a separate registry with `SetPolicy(readOnlyPolicy)`, which allows reads,
 search, git inspection, web fetches, and `repo_map` but refuses every mutation
 and `shell`. The nested registry never contains `subagent` itself, so recursion
 is impossible.
+
+`diagnostics` runs detected build/type-check/lint commands. Some checks report
+findings on stdout and still exit `0` — the clearest case is `gofmt -l` (list
+mode), which lists files needing formatting; non-empty list-mode output is
+treated as a failure even when the process exits successfully, and a timeout
+is detected separately from a command that simply errored.
 
 ### Mutation hooks, redaction, and edit previews
 - `Registry.AddMutationHook(fn)` receives `(name, args, paths)` **before** a
@@ -444,13 +488,18 @@ allowed** so local dev servers can be inspected. Redirects checked every hop
   detects "not loaded"/"not found + model" in the body and yields a clear
   `MODEL NOT LOADED` message (no raw HTTP dump).
 - **`Router`** (`router.go`) is the `Completer` used by `main.go`. It owns the
-  active client/model and an ordered fallback chain (`--fallback-models`).
-  `Complete` tries the active model, then each fallback; a successful fallback
-  becomes active and calls the switch callback. `SetModel`/`Model` power
-  `/model`; the router is safe for concurrent readers (client/model behind an
-  `RWMutex`). Streaming output from a failed attempt may already have been
-  emitted, so fallbacks are best for "model unavailable" failures rather than
-  mid-stream errors.
+  active client/model, the current thinking level, and an ordered fallback chain
+  (`--fallback-models`). `Complete` tries the active model, then each fallback;
+  a successful fallback becomes active and calls the switch callback.
+  `SetModel`/`Model` power `/model`; the router is safe for concurrent readers
+  (client/model/thinking behind an `RWMutex`).
+  `SetThinking` changes the reasoning effort for all subsequent requests — it
+  rebuilds the active client under the lock, because the effort is stored on
+  the `Client` and sent with each completion; mutating only the router field
+  would leave the running client on the old level.
+  Streaming output from a failed attempt may already have been emitted, so
+  fallbacks are best for "model unavailable" failures rather than mid-stream
+  errors.
 - **URL handling** (`endpointURLs`): accepts a host URL, `host/v1`, or even a full
   chat URL; normalizes to `/v1/chat/completions` + `/v1/models`.
 
@@ -583,19 +632,31 @@ Bubble Tea model (`tui.go`, ~1400 lines):
   Ctrl+P/N scroll message history. PgUp/PgDn + mouse wheel scroll the viewport.
 - **Transcript:** per-step tool output, **expandable with Ctrl+O** (`expandTools`).
 - **Status:** live context meter (`ctx <messages>/<window>`), current model from
-  the router (`ModelName`), and active mode.
+  the router (`ModelName`), active mode, and the current thinking level (rendered
+  dimmed in the status line while running, and echoed in the idle footer).
 - **Slash menu:** type `/`, filter, arrow-key to select, Tab/Enter to complete,
   Enter to run. Esc dismisses.
 - **Keys:** Enter send · Alt+Enter/Ctrl+J newline · Esc/Ctrl+C cancel run ·
   Ctrl+L clear transcript · Ctrl+R clear + reset conversation ·
-  Ctrl+C idle / Ctrl+D quit · y/a/A/n approval · ↑/↓/Tab/Enter slash menu.
+  Ctrl+C idle / Ctrl+D quit · y/a/A/n approval · ↑/↓/Tab/Enter slash menu ·
+  Tab (empty input) cycle mode · Shift+Tab (empty input) cycle thinking level.
 - **Markdown/rendering:** `markdown.go` (goldmark + glamour), `highlight.go`
   (chroma), `diff.go` (unified diff).
 - **Long operations:** approval previews can be multi-line; `/model` blocks up
   to 10s while listing; `/compact` and `/commit` run through the spinner and
   respect Esc cancellation.
 
-Slash commands (TUI): `/help /clear /reset /status /tools /expand /session /sessions /new /resume [id] /autoapprove [on|off] /approve-edits [on|off] /model [name] /compact /context /undo /commit [message] /mcp /skills /mode /quit`.
+Slash commands (TUI): `/help /clear /reset /status /tools /expand /session
+/sessions /new /resume [id] /autoapprove [on|off] /approve-edits [on|off]
+/model [name] /thinking [level] /theme [auto|dark|light] /compact /context
+/undo /commit [message] /copy /mcp /skills /mode /quit`.
+
+- `/thinking [level]` lists or sets the reasoning effort
+  (`none`/`low`/`medium`/`high`/`xhigh`, plus `off`, `1`–`4`, `max`); a bad
+  level is reported as an error, not silently ignored.
+- `/theme [auto|dark|light]` switches the syntax-highlighting palette (it also
+  drives `Highlight` on `tui.Model`); TUI-only, there is no `/theme` in the
+  REPL.
 
 `/commit [message]` stages everything with `git add -A`, then commits. When the
 message is empty it asks the model for a **Conventional Commits** message
@@ -603,8 +664,10 @@ message is empty it asks the model for a **Conventional Commits** message
 `git diff HEAD`; if the model is unavailable or returns nothing it falls back
 to `chore: update project files`. `git status --porcelain` is checked first —
 a clean tree returns "nothing to commit" without calling the model.
-Plain REPL supports the same set except `/expand`, `/session`, `/sessions`,
-`/new`, `/resume`, and `/mode`; entering `/` prints the full list.
+Plain REPL supports the same set except the TUI-only commands
+(`/clear` `/copy` `/expand` `/new` `/resume` `/session` `/sessions` `/theme`);
+the REPL also handles `/thinking` (via the router) and `/mode`. Entering `/`
+alone prints the command list.
 `/mcp [list|add|remove|reconnect]` manages MCP servers (see §8).
 
 ### ACP server (`internal/acp/`)
@@ -631,10 +694,12 @@ messages. The reader loop dispatches each request in its own goroutine so
   `debugger`/`3`, `cybersecurity`/`4`, `simplifier`/`5`, or a number) and calls
   `Agent.SetMode`, emitting a `current_mode_update` session update. Unknown
   mode ids are rejected with a `-32602` error.
-- `session/close` deletes the session and cancels any running prompt, then runs
-  the factory's cleanup. A `sessionId` that isn't registered (e.g. calling close
-  on an unknown id, or using a stale id after close) returns a `-32002` error
-  rather than crashing.
+- `session/close` deletes the session and cancels any running prompt, then
+  **waits for an in-flight prompt to finish** (via a per-session `done` channel)
+  before releasing the agent's resources, so closing a session never tears down
+  an agent that still holds it. A `sessionId` that isn't registered (e.g. calling
+  close on an unknown id, or using a stale id after close) returns a `-32002`
+  error rather than crashing.
 - Text and resource blocks are supported; image/audio blocks are not advertised.
   `session/load`, client `fs/*`/`terminal/*`, and per-session `mcpServers` are
   intentionally not implemented yet.
