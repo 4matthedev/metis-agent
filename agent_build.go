@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,59 @@ type builtAgent struct {
 	Close       func()
 }
 
+// The process-wide audit log: one append-only file under the data dir, shared
+// by every session (CLI and ACP). It is opened lazily and intentionally left
+// open for the life of the process (process exit flushes it); it is not closed
+// by any single agent's Close, which would cut off the other sessions.
+var (
+	auditLogMu       sync.Mutex
+	auditLogFile     *os.File
+	auditLogFileOpen bool
+)
+
+// openAuditLog lazily opens the process-wide audit log.
+func openAuditLog() error {
+	auditLogMu.Lock()
+	defer auditLogMu.Unlock()
+	if auditLogFileOpen {
+		return nil
+	}
+	d, err := config.DataDir()
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(d, "audit.log")
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	auditLogFile = f
+	auditLogFileOpen = true
+	return nil
+}
+
+// writeAudit appends one tools.AuditEntry to the audit log. It is best effort:
+// it never fails a tool call, and a crashed process may lose the last unflushed
+// line.
+func writeAudit(e tools.AuditEntry) {
+	if err := openAuditLog(); err != nil {
+		// Best effort: a logging failure must never fail a tool call.
+		return
+	}
+	auditLogMu.Lock()
+	defer auditLogMu.Unlock()
+	if auditLogFile == nil {
+		return
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	// Append a newline and write best-effort; auditing must never fail a tool
+	// call, so the (int, error) result is discarded.
+	auditLogFile.Write(append(b, byte('\n')))
+}
+
 // buildAgent constructs an agent for dir with the resolved provider, tools,
 // skills, MCP servers, instruction files, checkpoints, and verification. It is
 // used by the interactive entry point and by every ACP session.
@@ -49,6 +103,9 @@ func buildAgent(dir string, resolved *llm.Resolved, v config.Values, systemPromp
 	})
 	registry.SetRedactSecrets(v.RedactSecrets)
 	registry.SetApproveEdits(approveEdits)
+	// Every tool invocation (allowed or refused) is recorded to the process-wide
+	// audit log, for both the CLI and ACP sessions.
+	registry.SetAuditor(writeAudit)
 
 	cp, cpErr := checkpoint.New(dir)
 	if cpErr != nil {

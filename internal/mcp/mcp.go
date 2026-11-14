@@ -123,6 +123,34 @@ type Client struct {
 	session    *mcpsdk.ClientSession
 }
 
+// looksSecretName reports whether an env var name looks like it holds a secret.
+// It mirrors internal/tools' looksSecret so MCP servers (child processes)
+// cannot leak the parent's credentials.
+func looksSecretName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "AUTH"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// maskSecretEnv returns a copy of base with the values of any environment
+// variable whose name looks like a secret redacted to "<redacted>".
+func maskSecretEnv(base []string) []string {
+	out := make([]string, 0, len(base))
+	for _, e := range base {
+		i := strings.IndexByte(e, '=')
+		if i > 0 && looksSecretName(e[:i]) {
+			out = append(out, e[:i]+"=<redacted>")
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // Connect returns a client from a ServerConfig. The caller must Close it when
 // done. Returns nil client and an error on failure.
 func Connect(ctx context.Context, cfg ServerConfig) (*Client, error) {
@@ -138,7 +166,9 @@ func Connect(ctx context.Context, cfg ServerConfig) (*Client, error) {
 		cmd := exec.Command(cfg.Command, cfg.Args...)
 		// build env: base + overrides. Stdout/stderr are left unset so the SDK
 		// can use StdoutPipe/StdinPipe (which require them nil).
-		env := os.Environ()
+		// Mask secret-looking base env values; user-supplied cfg.Env is passed
+		// through as-is (it is the server's own configuration).
+		env := maskSecretEnv(os.Environ())
 		for k, v := range cfg.Env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}

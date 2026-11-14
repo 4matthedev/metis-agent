@@ -155,3 +155,99 @@ func TestApprovalClassificationOutsideProject(t *testing.T) {
 		t.Error("in-project file_read should not require approval")
 	}
 }
+
+// TestShellApprovalSurfacesCwd checks that the approval preview shows where the
+// command will run and explicitly flags out-of-project execution.
+func TestShellApprovalSurfacesCwd(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistryWithOptions(Options{WorkDir: root, EnableShell: true})
+	outside := t.TempDir()
+
+	// In-project cwd: surfaced in the summary, no "outside" note in the reason.
+	req, ok := reg.needApproval("shell", map[string]any{"command": "pwd", "cwd": "sub"})
+	if !ok {
+		t.Fatal("shell should require approval")
+	}
+	if !strings.Contains(req.Summary, "sub") {
+		t.Fatalf("summary did not surface in-project cwd: %q", req.Summary)
+	}
+	if strings.Contains(req.Reason, "outside the project") {
+		t.Fatalf("in-project cwd should not note 'outside the project': %q", req.Reason)
+	}
+
+	// Out-of-project cwd: surfaced and flagged in the reason.
+	outsidePath := filepath.Join(outside, "x")
+	req, ok = reg.needApproval("shell", map[string]any{"command": "pwd", "cwd": outsidePath})
+	if !ok {
+		t.Fatal("shell should require approval")
+	}
+	if !strings.Contains(req.Summary, outsidePath) {
+		t.Fatalf("summary did not surface out-of-project cwd: %q", req.Summary)
+	}
+	if !strings.Contains(req.Reason, "outside the project") {
+		t.Fatalf("reason did not flag out-of-project cwd: %q", req.Reason)
+	}
+}
+
+// TestRequestHeadersStripsSensitiveHeaders checks that http_fetch never
+// forwards credential-bearing headers, even when the model supplies them.
+func TestRequestHeadersStripsSensitiveHeaders(t *testing.T) {
+	h, err := requestHeaders(map[string]any{
+		"headers": map[string]any{
+			"Authorization":       "Bearer secret-token",
+			"Proxy-Authorization": "Basic dXNlcjpwYXNzdXNl",
+			"Cookie":              "session=abc; path=/",
+			"Set-Cookie":          "x=y",
+			"X-Custom":            "visible",
+		},
+	})
+	if err != nil {
+		t.Fatalf("requestHeaders: %v", err)
+	}
+	for _, s := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie"} {
+		if _, got := h[s]; got {
+			t.Errorf("sensitive header %q was forwarded", s)
+		}
+	}
+	if v, ok := h["X-Custom"]; !ok || v != "visible" {
+		t.Fatalf("non-sensitive header lost: X-Custom = %q (ok=%v)", v, ok)
+	}
+}
+
+// TestMaskSecretEnv checks that secret-looking environment values are redacted
+// while build-critical variables (PATH, HOME) are left intact.
+func TestMaskSecretEnv(t *testing.T) {
+	base := []string{
+		"PATH=/usr/local/bin:/usr/bin",
+		"HOME=/home/user",
+		"AWS_SECRET_KEY=super-secret",
+		"GITHUB_TOKEN=ghp_123456",
+		"MY_PASSWORD=x",
+		"DB_AUTH_TOKEN=secret",
+		"NORMAL_VAR=visible",
+	}
+	seen := map[string]string{}
+	for _, e := range maskSecretEnv(base) {
+		i := strings.IndexByte(e, '=')
+		if i <= 0 {
+			continue
+		}
+		seen[e[:i]] = e[i+1:]
+	}
+	mustRedact := []string{"AWS_SECRET_KEY", "GITHUB_TOKEN", "MY_PASSWORD", "DB_AUTH_TOKEN"}
+	for _, k := range mustRedact {
+		if v, ok := seen[k]; ok && v != "<redacted>" {
+			t.Fatalf("secret %q not masked: got %q", k, v)
+		}
+	}
+	mustKeep := []string{"PATH", "HOME", "NORMAL_VAR"}
+	for _, k := range mustKeep {
+		v, has := seen[k]
+		if !has {
+			t.Fatalf("variable %q missing from masked env", k)
+		}
+		if v == "<redacted>" {
+			t.Fatalf("non-secret %q was masked: %q", k, v)
+		}
+	}
+}

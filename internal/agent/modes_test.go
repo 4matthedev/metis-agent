@@ -12,7 +12,7 @@ import (
 // mutating tools are hidden from the model and refused even when auto-approve
 // is on.
 func TestPlannerPolicyIsEnforced(t *testing.T) {
-	reg := tools.NewRegistry(t.TempDir()) // auto-approve is ON in this constructor
+	reg := tools.NewRegistry(t.TempDir()) // default: auto-approve is OFF (safe default)
 	a := New(Config{LLM: &fakeCompleter{}, Registry: reg, System: "sys"})
 
 	a.SetMode(ModePlanner)

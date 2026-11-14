@@ -276,6 +276,16 @@ func requestBody(args map[string]any, method string) (string, string, error) {
 	return body, contentType, nil
 }
 
+// sensitiveFetchHeaders are header names that must never be forwarded on
+// outbound http_fetch requests. The model can inject them from fetched content
+// to attach credentials (or session cookies) to an external target.
+var sensitiveFetchHeaders = map[string]bool{
+	"Authorization":       true,
+	"Proxy-Authorization": true,
+	"Cookie":              true,
+	"Set-Cookie":          true,
+}
+
 func requestHeaders(args map[string]any) (map[string]string, error) {
 	out := map[string]string{}
 	raw, ok := args["headers"].(map[string]any)
@@ -292,6 +302,11 @@ func requestHeaders(args map[string]any) (map[string]string, error) {
 		}
 		if strings.ContainsAny(k, "\r\n:") {
 			return nil, fmt.Errorf("invalid header name %q", k)
+		}
+		// Refuse credential-bearing headers so external content cannot attach
+		// our secrets to an arbitrary target.
+		if sensitiveFetchHeaders[k] {
+			continue
 		}
 		value, ok := v.(string)
 		if !ok {

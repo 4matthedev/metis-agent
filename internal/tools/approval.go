@@ -124,10 +124,20 @@ func (r *Registry) needApproval(name string, args map[string]any) (ApprovalReque
 
 	switch name {
 	case "shell":
-		// Show the command verbatim. Truncating the preview would let a
-		// payload hide past the cut, which defeats the approval gate.
-		req.Summary = "$ " + path("command")
+		cmd := path("command")
+		cwd := path("cwd")
+		// Show the command and its working directory verbatim. Truncating the
+		// preview would let a payload hide past the cut, and the user must be
+		// able to see where the command runs — a harmless-looking command is
+		// still dangerous in the wrong directory.
+		req.Summary = "$ " + cmd
+		if cwd != "" {
+			req.Summary += "  (in " + cwd + ")"
+		}
 		req.Reason = "shell commands can modify files, run programs, and access the network."
+		if cwd != "" && !r.insideProject(cwd) {
+			req.Reason += " The command will run outside the project directory."
+		}
 		return req, true
 
 	case "diagnostics":

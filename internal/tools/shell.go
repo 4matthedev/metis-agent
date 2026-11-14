@@ -82,7 +82,11 @@ func NewShellTool(workDir string, defaultTimeout time.Duration, maxOutput int) *
 			cmd.Dir = dir
 			cmd.Stdout = out
 			cmd.Stderr = out
-			cmd.Env = append(os.Environ(),
+			// Mask secret-looking environment values so a model cannot exfiltrate
+			// credentials by running `env`, `printenv`, or `base64`. Build-critical
+			// vars (PATH, HOME, ...) are left intact.
+			cmd.Env = maskSecretEnv(os.Environ())
+			cmd.Env = append(cmd.Env,
 				"PAGER=cat",
 				"GIT_PAGER=cat",
 				"GIT_EDITOR=true",
@@ -125,6 +129,23 @@ func NewShellTool(workDir string, defaultTimeout time.Duration, maxOutput int) *
 			return b.String(), nil
 		},
 	}
+}
+
+// maskSecretEnv returns a copy of base with the values of any environment
+// variable whose name looks like a secret redacted to "<redacted>". Build-
+// critical vars (PATH, HOME, ...) are untouched. This stops a model from
+// learning credentials by running `env`, `printenv`, or `base64`.
+func maskSecretEnv(base []string) []string {
+	out := make([]string, 0, len(base))
+	for _, e := range base {
+		i := strings.IndexByte(e, '=')
+		if i > 0 && looksSecret(e[:i]) {
+			out = append(out, e[:i]+"=<redacted>")
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // readCapturedOutput reads at most max bytes, keeping the head and the tail

@@ -17,6 +17,34 @@ import (
 // context. Individual tools may return more; the registry truncates the middle.
 const maxToolResult = 96 * 1024
 
+// AuditEntry records one tool invocation for an append-only audit log.
+// Every Execute produces exactly one entry: an allowed or refused call, with
+// whether it went through the approval gate and what the decision was.
+type AuditEntry struct {
+	Time     string `json:"time"`
+	Tool     string `json:"tool"`
+	Required bool   `json:"required"` // went through the approval gate
+	Decision string `json:"decision"` // deny/once/always/all
+	Denied   bool   `json:"denied"`
+	Summary  string `json:"summary,omitempty"`
+}
+
+// decisionName gives a compact label for JSON audit output.
+func (d ApprovalDecision) decisionName() string {
+	switch d {
+	case ApprovalDeny:
+		return "deny"
+	case ApprovalOnce:
+		return "once"
+	case ApprovalAlways:
+		return "always"
+	case ApprovalAll:
+		return "all"
+	default:
+		return "unknown"
+	}
+}
+
 // Policy decides whether a tool may run in the agent's current posture. It
 // receives the decoded arguments so it can reject a specific action (for
 // example, the mutating "run" action of the skills tool). When args is nil the
@@ -43,6 +71,9 @@ type Registry struct {
 	mutations     int
 	redact        bool
 	approveEdits  bool
+	// auditMu guards the auditor callback (set once, read from the agent loop).
+	auditMu sync.RWMutex
+	auditor func(AuditEntry)
 	approvalState
 }
 
@@ -63,10 +94,11 @@ type Options struct {
 }
 
 // NewRegistry returns a registry with the default toolset. Dangerous calls are
-// auto-approved for this legacy constructor; the CLI uses
-// NewRegistryWithOptions so it can prompt the user.
+// denied by default (a safe posture): a registry with no installed approver must
+// never silently run destructive or out-of-project work. Use
+// NewRegistryWithOptions to opt in to auto-approval.
 func NewRegistry(workDir string) *Registry {
-	return NewRegistryWithOptions(Options{WorkDir: workDir, EnableShell: true, AutoApprove: true})
+	return NewRegistryWithOptions(Options{WorkDir: workDir, EnableShell: true, AutoApprove: false})
 }
 
 // NewRegistryWithOptions returns a registry configured by opts.
@@ -149,6 +181,27 @@ func (r *Registry) SetPolicy(p Policy) {
 	r.policyMu.Lock()
 	r.policy = p
 	r.policyMu.Unlock()
+}
+
+// SetAuditor installs a callback that receives one AuditEntry after every
+// Execute (allowed or refused). It must be thread-safe and must not block,
+// since it is invoked from the agent loop. nil means auditing is disabled.
+func (r *Registry) SetAuditor(fn func(AuditEntry)) {
+	r.auditMu.Lock()
+	r.auditor = fn
+	r.auditMu.Unlock()
+}
+
+// emitAudit records an invocation through the installed auditor (if any),
+// without failing the caller if auditing is unavailable.
+func (r *Registry) emitAudit(e AuditEntry) {
+	r.auditMu.RLock()
+	fn := r.auditor
+	r.auditMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	fn(e)
 }
 
 // SetRedactSecrets enables or disables credential redaction on tool output.
@@ -360,22 +413,42 @@ func (r *Registry) Execute(ctx context.Context, name string, input []byte) strin
 	} else if err := json.Unmarshal(input, &args); err != nil {
 		return fmt.Sprintf("error: invalid tool arguments: %v", err)
 	}
+	audit := AuditEntry{
+		Time:     time.Now().Format(time.RFC3339Nano),
+		Tool:     name,
+		Decision: ApprovalOnce.decisionName(),
+	}
 	if ok, reason := r.allow(name, args); !ok {
+		audit.Denied = true
+		audit.Decision = ApprovalDeny.decisionName()
+		r.emitAudit(audit)
 		return fmt.Sprintf("error: tool %s is not available: %s", name, reason)
 	}
+	decision := ApprovalOnce
 	if req, ok := r.needApproval(name, args); ok {
-		decision, err := r.approvalState.request(ctx, req)
-		if err != nil {
-			return fmt.Sprintf("error: %v", err)
+		audit.Required = true
+		audit.Summary = req.Summary
+		d, appErr := r.approvalState.request(ctx, req)
+		if appErr != nil {
+			audit.Denied = true
+			audit.Decision = ApprovalDeny.decisionName()
+			r.emitAudit(audit)
+			return fmt.Sprintf("error: %v", appErr)
 		}
-		if decision == ApprovalDeny {
+		if d == ApprovalDeny {
+			audit.Denied = true
+			audit.Decision = ApprovalDeny.decisionName()
+			r.emitAudit(audit)
 			return fmt.Sprintf("error: user denied permission to run %s. Do not retry this call; ask the user how to proceed.", name)
 		}
+		decision = d
 	}
+	audit.Decision = decision.decisionName()
 	paths := r.mutationPaths(name, args)
 	mutating := r.notifyMutation(name, args, paths)
 	out, err := t.Handler(ctx, args)
 	if err != nil {
+		r.emitAudit(audit)
 		return fmt.Sprintf("error: %v", err)
 	}
 	if mutating {
@@ -390,6 +463,7 @@ func (r *Registry) Execute(ctx context.Context, name string, input []byte) strin
 	if shouldRedact {
 		out = redact.String(out)
 	}
+	r.emitAudit(audit)
 	return out
 }
 

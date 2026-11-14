@@ -160,7 +160,10 @@ func TestSearch(t *testing.T) {
 
 func TestShellSuccessAndFailure(t *testing.T) {
 	root := t.TempDir()
-	reg := NewRegistry(root)
+	// These tests exercise shell mechanics, not the approval gate, so auto-approve
+	// is enabled to let the command run. The approval path is tested in
+	// security_test.go.
+	reg := NewRegistryWithOptions(Options{WorkDir: root, EnableShell: true, AutoApprove: true})
 
 	out := runTool(t, reg, "shell", `{"command":"printf 'hello\\n'"}`)
 	if !strings.Contains(out, "exit code: 0") || !strings.Contains(out, "hello") {
@@ -178,7 +181,7 @@ func TestShellWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reg := NewRegistry(root)
+	reg := NewRegistryWithOptions(Options{WorkDir: root, EnableShell: true, AutoApprove: true})
 	out := runTool(t, reg, "shell", `{"command":"pwd","cwd":"sub"}`)
 	if !strings.Contains(out, filepath.Join(root, "sub")) {
 		t.Fatalf("cwd not honoured: %q", out)
@@ -186,7 +189,7 @@ func TestShellWorkingDirectory(t *testing.T) {
 }
 
 func TestShellTimeoutKillsChildren(t *testing.T) {
-	reg := NewRegistry(t.TempDir())
+	reg := NewRegistryWithOptions(Options{WorkDir: t.TempDir(), EnableShell: true, AutoApprove: true})
 	start := time.Now()
 	out := runTool(t, reg, "shell", `{"command":"sh -c 'sleep 10 & wait'","timeout_sec":1}`)
 	if !strings.Contains(out, "timed out") {
@@ -198,7 +201,7 @@ func TestShellTimeoutKillsChildren(t *testing.T) {
 }
 
 func TestShellCancellation(t *testing.T) {
-	reg := NewRegistry(t.TempDir())
+	reg := NewRegistryWithOptions(Options{WorkDir: t.TempDir(), EnableShell: true, AutoApprove: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
