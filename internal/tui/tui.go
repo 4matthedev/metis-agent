@@ -99,6 +99,7 @@ const (
 	blockError
 	blockSystem
 	blockWelcome
+	blockApproval
 )
 
 type block struct {
@@ -144,6 +145,10 @@ type Model struct {
 	opts   Options
 	width  int
 	height int
+	// layoutW/H record the size the last layout pass was computed for, so
+	// View can refresh geometry when a test or caller resizes directly.
+	layoutW int
+	layoutH int
 
 	viewport viewport.Model
 	input    textarea.Model
@@ -161,6 +166,11 @@ type Model struct {
 	step     int
 	status   string
 	err      string
+
+	// Cached context usage. The agent holds its lock for the whole run, so
+	// View must never call into it while running or rendering would block.
+	ctxMsgs   int
+	ctxWindow int
 
 	history []string
 	histPos int
@@ -210,8 +220,8 @@ func Run(a *agent.Agent, opts Options) error {
 
 func newModel(a *agent.Agent, opts Options) *Model {
 	ta := textarea.New()
-	ta.Placeholder = "Ask Metis to do something…"
-	ta.Prompt = "› "
+	ta.Placeholder = "Ask Metis to build, fix, or explain…"
+	ta.Prompt = "❯ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(1)
@@ -229,7 +239,7 @@ func newModel(a *agent.Agent, opts Options) *Model {
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
+	sp.Style = lipgloss.NewStyle().Foreground(colPrimary)
 
 	m := &Model{
 		agent:           a,
@@ -257,13 +267,14 @@ func newModel(a *agent.Agent, opts Options) *Model {
 	if m.sess != nil && m.agent.HistoryLen() > 0 {
 		m.replayHistory()
 	}
+	m.refreshContextInfo()
 	m.layout()
 	m.syncViewport(true)
 	return m
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.input.Focus(), tea.SetWindowTitle("metis"))
+	return tea.Batch(m.input.Focus(), tea.SetWindowTitle("metis · coding agent"))
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -298,7 +309,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingApproval = &pendingApproval{req: msg.req, resp: msg.resp}
 		m.blocks = append(m.blocks, block{
-			kind: blockSystem,
+			kind: blockApproval,
 			text: formatApprovalRequest(msg.req),
 		})
 		m.status = "approval needed"
@@ -328,6 +339,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.saveSession()
 		}
+		m.refreshContextInfo()
 		m.syncViewport(true)
 		return m, m.input.Focus()
 
@@ -363,6 +375,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.saveSession()
 		}
 		m.finalizeAssistant()
+		m.refreshContextInfo()
 		cmd := m.maybeFinish()
 		m.syncViewport(false)
 		return m, cmd

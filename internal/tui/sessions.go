@@ -64,6 +64,7 @@ func (m *Model) resetSessionHistory() {
 		m.sess.Messages = nil
 		m.saveSession()
 	}
+	m.refreshContextInfo()
 }
 
 func (m *Model) sessionsOn() bool {
@@ -125,6 +126,7 @@ func (m *Model) newSession() {
 	m.elapsed = 0
 	m.step = 0
 	m.activeAssistant = -1
+	m.refreshContextInfo()
 	m.saveSession()
 }
 
@@ -160,4 +162,5 @@ func (m *Model) resumeSession(name string) {
 	m.elapsed = 0
 	m.step = 0
 	m.activeAssistant = -1
+	m.refreshContextInfo()
 }

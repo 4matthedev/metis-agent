@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"metis-agent/internal/llm"
 )
 
@@ -131,7 +132,7 @@ func (m *Model) suggestionLimit() int {
 		limit = n
 	}
 	if m.height > 0 {
-		if avail := m.height - 10; avail < limit {
+		if avail := m.height - 12; avail < limit {
 			limit = avail
 		}
 	}
@@ -141,7 +142,8 @@ func (m *Model) suggestionLimit() int {
 	return limit
 }
 
-// paletteHeight reports how many rows the completion menu occupies.
+// paletteHeight reports how many rows the completion menu occupies, including
+// its rounded border.
 func (m *Model) paletteHeight() int {
 	n := len(m.suggestions())
 	limit := m.suggestionLimit()
@@ -149,9 +151,9 @@ func (m *Model) paletteHeight() int {
 		return 0
 	}
 	if n > limit {
-		return limit
+		return limit + 2
 	}
-	return n
+	return n + 2
 }
 
 // completeSuggestion replaces the input with the selected command. Commands
@@ -207,6 +209,7 @@ func (m *Model) suggestionView() string {
 		end = len(list)
 	}
 	width := max(20, m.width)
+	rowW := max(16, width-4)
 	var b strings.Builder
 	for i := start; i < end; i++ {
 		c := list[i]
@@ -214,7 +217,12 @@ func (m *Model) suggestionView() string {
 		if c.args != "" {
 			usage += " " + c.args
 		}
-		line := truncate(fmt.Sprintf("  %-24s %s", usage, c.desc), width)
+		marker := "  "
+		if i == m.suggestSel {
+			marker = "› "
+		}
+		line := truncate(fmt.Sprintf("%s%-24s %s", marker, usage, c.desc), rowW)
+		line = padRight(line, rowW)
 		if i == m.suggestSel {
 			b.WriteString(styleSuggest.Render(line))
 		} else {
@@ -224,7 +232,12 @@ func (m *Model) suggestionView() string {
 			b.WriteByte('\n')
 		}
 	}
-	return b.String()
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colRule).
+		Padding(0, 1).
+		Width(max(20, m.width-2))
+	return box.Render(b.String())
 }
 
 func (m *Model) submit() tea.Cmd {

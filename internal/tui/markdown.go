@@ -1,14 +1,13 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/ansi"
+	glamouransi "github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
-	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 type markdownKey struct {
@@ -27,14 +26,14 @@ func boolPtr(b bool) *bool    { return &b }
 
 // markdownStyle is a restrained theme that follows the terminal background
 // instead of imposing glamour's default document margins and heading blocks.
-func markdownStyle(dark bool) ansi.StyleConfig {
-	var cfg ansi.StyleConfig
-	accent, muted, text := "#7AA2F7", "#565F89", "#C0CAF5"
+func markdownStyle(dark bool) glamouransi.StyleConfig {
+	var cfg glamouransi.StyleConfig
+	accent, muted, text := "#9D7CD8", "#6A6A6A", "#E0E0E0"
 	if dark {
 		cfg = styles.DarkStyleConfig
 	} else {
 		cfg = styles.LightStyleConfig
-		accent, muted, text = "#1D4ED8", "#6B7280", "#111827"
+		accent, muted, text = "#D68C27", "#8A8A8A", "#2A2A2A"
 	}
 
 	cfg.Document.Margin = uintPtr(0)
@@ -44,22 +43,22 @@ func markdownStyle(dark bool) ansi.StyleConfig {
 
 	cfg.Heading.Color = strPtr(accent)
 	cfg.Heading.Bold = boolPtr(true)
-	cfg.H1 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H1 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(accent), Bold: boolPtr(true), BlockSuffix: "\n",
 	}}
-	cfg.H2 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H2 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(accent), Bold: boolPtr(true), Prefix: "## ", BlockSuffix: "\n",
 	}}
-	cfg.H3 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H3 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(accent), Bold: boolPtr(true), Prefix: "### ", BlockSuffix: "\n",
 	}}
-	cfg.H4 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H4 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(accent), Bold: boolPtr(true), Prefix: "#### ",
 	}}
-	cfg.H5 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H5 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(accent), Bold: boolPtr(true), Prefix: "##### ",
 	}}
-	cfg.H6 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+	cfg.H6 = glamouransi.StyleBlock{StylePrimitive: glamouransi.StylePrimitive{
 		Color: strPtr(muted), Prefix: "###### ",
 	}}
 
@@ -167,30 +166,24 @@ func trimLineRight(line string) string {
 	return trimmed
 }
 
-// renderAssistant renders one completed assistant turn with the hanging label
-// used by the rest of the transcript.
+// renderAssistant renders one assistant turn as a primary-edged card.
 func renderAssistant(text string, width int, streaming bool) string {
+	inner := max(12, width-2)
+	var body string
 	if streaming {
-		return renderChat("metis", styleMetis, text, width, true)
-	}
-	body := renderMarkdown(text, max(12, width-7))
-	if strings.TrimSpace(stripANSI(body)) == "" {
-		body = " "
-	}
-	return prefixLabel("metis", styleMetis, body)
-}
-
-func prefixLabel(name string, label lipgloss.Style, body string) string {
-	const prefixW = 7
-	prefix := label.Render(fmt.Sprintf("%-5s", name)) + styleDim.Render("  ")
-	indent := strings.Repeat(" ", prefixW)
-	lines := strings.Split(body, "\n")
-	for i := range lines {
-		if i == 0 {
-			lines[i] = prefix + lines[i]
-		} else {
-			lines[i] = indent + lines[i]
+		plain := clean(text)
+		if plain == "" {
+			plain = " "
+		}
+		body = xansi.Wrap(plain, max(10, inner-1), "")
+		lines := strings.Split(body, "\n")
+		lines[len(lines)-1] += styleCursor.Render("▌")
+		body = styleText.Render(strings.Join(lines, "\n"))
+	} else {
+		body = renderMarkdown(text, inner)
+		if strings.TrimSpace(stripANSI(body)) == "" {
+			body = " "
 		}
 	}
-	return strings.Join(lines, "\n")
+	return card(colPrimary, width, styleMetis.Render("metis")+"\n"+body)
 }

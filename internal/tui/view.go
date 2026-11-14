@@ -2,10 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"metis-agent/internal/llm"
 )
@@ -41,9 +44,9 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	inputWidth := m.width - 2
-	if inputWidth < 20 {
-		inputWidth = 20
+	inputWidth := m.width - 4
+	if inputWidth < 16 {
+		inputWidth = 16
 	}
 	m.input.SetWidth(inputWidth)
 	m.input.SetHeight(m.calcInputHeight())
@@ -56,6 +59,8 @@ func (m *Model) layout() {
 	}
 	m.viewport.Width = m.width
 	m.viewport.Height = vh
+	m.layoutW = m.width
+	m.layoutH = m.height
 }
 
 func (m *Model) syncViewport(forceBottom bool) {
@@ -87,7 +92,7 @@ func (m *Model) transcript() string {
 func (m *Model) renderBlock(b *block, width int) string {
 	switch b.kind {
 	case blockUser:
-		return renderChat("you", styleUser, b.text, width-1, false)
+		return renderUser(b.text, width-1)
 	case blockAssistant:
 		if b.streaming {
 			return renderAssistant(b.text, width-1, true)
@@ -121,10 +126,16 @@ func (m *Model) renderBlock(b *block, width int) string {
 		return b.cache
 	case blockError:
 		return renderError(b.text, width-1)
+	case blockApproval:
+		return renderApproval(b.text, width-1)
 	case blockSystem:
 		return renderSystem(b.text, width-1)
 	case blockWelcome:
-		return renderWelcome(m.opts, width-1)
+		height := m.viewport.Height
+		if height <= 0 {
+			height = 17
+		}
+		return renderWelcome(m.opts, width-1, height)
 	default:
 		return ""
 	}
@@ -133,6 +144,11 @@ func (m *Model) renderBlock(b *block, width int) string {
 func (m *Model) View() string {
 	if m.width < 30 || m.height < 12 {
 		return "metis needs at least 30×12.\nResize the terminal to continue."
+	}
+	// Keep geometry coherent even when View is called directly (for example
+	// from tests) without a preceding WindowSizeMsg.
+	if m.layoutW != m.width || m.layoutH != m.height {
+		m.layout()
 	}
 	parts := []string{
 		m.headerView(),
@@ -143,71 +159,102 @@ func (m *Model) View() string {
 		parts = append(parts, palette)
 	}
 	parts = append(parts, m.inputView(), m.footerView())
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return fitView(lipgloss.JoinVertical(lipgloss.Left, parts...), m.width, m.height)
+}
+
+// fitView enforces the terminal bounds: every line is clipped to the width and
+// the block is padded or trimmed to exactly height lines. Keeping this
+// invariant means chrome changes cannot push the composer off screen.
+func fitView(s string, width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) headerView() string {
 	width := max(10, m.width)
-	brand := styleBrand.Render("▌ metis") + styleDim.Render("  coding agent")
-	server := strings.TrimPrefix(strings.TrimPrefix(m.opts.Server, "https://"), "http://")
-	rightText := oneLine(clean(m.currentModel() + " · " + server))
-	right := styleHeaderSub.Render(truncate(rightText, max(5, width-lipgloss.Width(brand)-2)))
+	brand := styleBrand.Render("◆ metis") + styleDim.Render("  coding agent")
+	meta := projectLabel(m.opts.Dir) + " · " + m.currentModel()
+	right := styleHeaderSub.Render(truncate(oneLine(clean(meta)), max(5, width-lipgloss.Width(brand)-2)))
 	top := joinLR(brand, right, width)
 	rule := styleRule.Render(strings.Repeat("─", width))
 	return top + "\n" + rule
+}
+
+func (m *Model) modeName() string {
+	if m.modeIdx >= 0 && m.modeIdx < len(modes) {
+		return modes[m.modeIdx].label
+	}
+	return modes[0].label
+}
+
+func (m *Model) thinkingName() string {
+	if m.opts.SetThinking != nil && m.opts.ThinkingLevel != nil {
+		return m.opts.ThinkingLevel().String()
+	}
+	if m.opts.Thinking != "" {
+		return m.opts.Thinking
+	}
+	return "none"
 }
 
 func (m *Model) statusView() string {
 	var left, right string
 	switch {
 	case m.pendingApproval != nil:
-		left = styleTool.Render("approval needed")
+		left = styleWarn.Render("● approval needed") + "  " +
+			styleDim.Render("review the diff above")
 		right = styleDim.Render("y allow · a always · A auto · n deny")
 	case m.running:
-		left = m.spinner.View() + " " + styleStatusOn.Render(m.status)
-		modeLabel := modes[m.modeIdx].label
-		thinking := "none"
-		if m.opts.SetThinking != nil && m.opts.ThinkingLevel != nil {
-			thinking = m.opts.ThinkingLevel().String()
-		}
-		right = styleDim.Render(fmt.Sprintf("step %d  ·  %s  ·  %s  ·  %s  ·  %s  ·  esc cancel",
-			m.step, fmtDuration(time.Since(m.started)), modeLabel, thinking, m.contextMeter()))
+		left = m.spinner.View() + " " + styleStatusOn.Render(m.status) + "  " +
+			styleDim.Render(fmt.Sprintf("step %d · %s", m.step, fmtDuration(time.Since(m.started))))
+		right = pill(m.modeName(), colSecondary) + " " +
+			styleDim.Render(m.thinkingName()+"  ·  "+m.contextMeter()+"  ·  esc cancel")
 	case m.err != "":
-		msg := oneLine(clean(m.err))
 		left = styleError.Render("● error") + "  " +
-			styleText.Render(truncate(msg, max(10, m.width-32)))
+			styleText.Render(truncate(oneLine(clean(m.err)), max(10, m.width-26)))
 		right = styleDim.Render("last run failed")
 	case m.status == "cancelled":
-		left = styleDim.Render("○ cancelled")
+		left = styleWarn.Render("○ cancelled")
+		right = styleDim.Render("enter to retry")
 	default:
-		modeLabel := modes[m.modeIdx].label
-		thinking := "none"
-		if m.opts.SetThinking != nil && m.opts.ThinkingLevel != nil {
-			thinking = m.opts.ThinkingLevel().String()
-		}
 		left = styleOK.Render("●") + " " + styleStatus.Render("ready") + "  " +
-			styleStatusOn.Render("· "+modeLabel) + "  " + styleDim.Render(thinking)
+			pill(m.modeName(), colSecondary) + " " + styleDim.Render(m.thinkingName())
 		if m.step > 0 {
 			steps := "steps"
 			if m.step == 1 {
 				steps = "step"
 			}
-			right = styleDim.Render(fmt.Sprintf("%d %s  ·  %s  ·  %s  ·  tab mode · shift+tab thinking",
-				m.step, steps, fmtDuration(m.elapsed), m.contextMeter()))
+			right = styleDim.Render(fmt.Sprintf("%d %s · %s · %s  ", m.step, steps, fmtDuration(m.elapsed), m.contextMeter())) +
+				pill(m.currentModel(), colPrimary)
 		} else {
-			right = styleDim.Render(m.contextMeter() + "  ·  tab mode · shift+tab thinking · esc cancel")
+			right = styleDim.Render(m.contextMeter()+"  ") + pill(m.currentModel(), colPrimary)
 		}
 	}
 	return " " + joinLR(left, right, max(10, m.width-2)) + " "
 }
 
 func (m *Model) inputView() string {
-	rule := styleRule.Render(strings.Repeat("─", m.width))
-	return rule + "\n" + styleComposer.Render(m.input.View()) + "\n" + rule
+	style := styleComposer
+	if m.running || m.pendingApproval != nil {
+		style = styleComposerBusy
+	}
+	return style.Render(m.input.View())
 }
 
 func (m *Model) footerView() string {
-	hint := "enter send  ·  tab mode  ·  alt+enter newline  ·  /help  ·  ctrl+c quit"
+	hint := "enter send  ·  tab mode  ·  shift+tab thinking  ·  /help  ·  ctrl+c quit"
 	if m.pendingApproval != nil {
 		hint = "y allow once  ·  a always allow tool  ·  A auto-approve all  ·  n deny  ·  esc cancel"
 	} else if m.running {
@@ -224,13 +271,23 @@ func (m *Model) footerView() string {
 	return " " + styleFooter.Render(truncate(hint, max(1, m.width-2)))
 }
 
-// contextMeter renders message usage against the configured window.
-func (m *Model) contextMeter() string {
+// refreshContextInfo snapshots the agent's context usage. It must only be
+// called while no run is active: the agent holds its lock for the whole run,
+// and View is rendered on the same goroutine as the UI loop.
+func (m *Model) refreshContextInfo() {
 	msgs, _, window := m.agent.ContextInfo()
-	if window <= 0 {
-		return fmt.Sprintf("ctx %d", msgs)
+	m.ctxMsgs = msgs
+	m.ctxWindow = window
+}
+
+// contextMeter renders cached message usage against the configured window.
+// It deliberately avoids Agent.ContextInfo: calling into the agent from View
+// deadlocks as soon as a run starts.
+func (m *Model) contextMeter() string {
+	if m.ctxWindow <= 0 {
+		return fmt.Sprintf("ctx %d", m.ctxMsgs)
 	}
-	return fmt.Sprintf("ctx %d/%d", msgs, window)
+	return fmt.Sprintf("ctx %d/%d", m.ctxMsgs, m.ctxWindow)
 }
 
 func joinLR(left, right string, width int) string {
@@ -247,6 +304,26 @@ func joinLR(left, right string, width int) string {
 		gap = 0
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+func projectPath(dir string) string {
+	if dir == "" || dir == "." {
+		if wd, err := os.Getwd(); err == nil {
+			return wd
+		}
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+func projectLabel(dir string) string {
+	path := projectPath(dir)
+	if base := filepath.Base(path); base != "" && base != "." {
+		return base
+	}
+	return path
 }
 
 func friendlyError(err error) string {

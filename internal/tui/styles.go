@@ -9,179 +9,162 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Palette. Adaptive colors keep the interface readable on both dark and light
-// terminals while staying understated.
+// Palette. A warm accent against cool secondary and structural tones, tuned
+// separately for dark and light terminals.
 var (
-	colAccent = lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#7AA2F7"}
-	colUser   = lipgloss.AdaptiveColor{Light: "#047857", Dark: "#9ECE6A"}
-	colTool   = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#E0AF68"}
-	colOK     = lipgloss.AdaptiveColor{Light: "#15803D", Dark: "#9ECE6A"}
-	colError  = lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#F7768E"}
-	colMuted  = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#565F89"}
-	colRule   = lipgloss.AdaptiveColor{Light: "#D1D5DB", Dark: "#3B4261"}
+	colPrimary   = lipgloss.AdaptiveColor{Light: "#3B7DD8", Dark: "#FAB283"}
+	colSecondary = lipgloss.AdaptiveColor{Light: "#7B5BB6", Dark: "#5C9CF5"}
+	colAccent    = lipgloss.AdaptiveColor{Light: "#D68C27", Dark: "#9D7CD8"}
+	colOK        = lipgloss.AdaptiveColor{Light: "#3D9A57", Dark: "#7FD88F"}
+	colWarn      = lipgloss.AdaptiveColor{Light: "#D68C27", Dark: "#F5A742"}
+	colError     = lipgloss.AdaptiveColor{Light: "#D1383D", Dark: "#E06C75"}
+	colMuted     = lipgloss.AdaptiveColor{Light: "#8A8A8A", Dark: "#6A6A6A"}
+	colText      = lipgloss.AdaptiveColor{Light: "#2A2A2A", Dark: "#E0E0E0"}
+	colRule      = lipgloss.AdaptiveColor{Light: "#D3D3D3", Dark: "#4B4C5C"}
+	colSel       = lipgloss.AdaptiveColor{Light: "#E5E5E6", Dark: "#303030"}
+	colOnColor   = lipgloss.AdaptiveColor{Light: "#F8F8F8", Dark: "#212121"}
 )
 
 var (
-	styleText      = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#111827", Dark: "#C0CAF5"})
-	styleBrand     = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	styleText      = lipgloss.NewStyle().Foreground(colText)
+	styleBrand     = lipgloss.NewStyle().Foreground(colPrimary).Bold(true)
+	styleLogoAgent = lipgloss.NewStyle().Foreground(colSecondary).Bold(true)
 	styleHeaderSub = lipgloss.NewStyle().Foreground(colMuted)
 	styleRule      = lipgloss.NewStyle().Foreground(colRule)
-	styleUser      = lipgloss.NewStyle().Foreground(colUser).Bold(true)
-	styleMetis     = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
-	styleTool      = lipgloss.NewStyle().Foreground(colTool).Bold(true)
+	styleUser      = lipgloss.NewStyle().Foreground(colSecondary).Bold(true)
+	styleMetis     = lipgloss.NewStyle().Foreground(colPrimary).Bold(true)
+	styleTool      = lipgloss.NewStyle().Foreground(colWarn).Bold(true)
 	styleOK        = lipgloss.NewStyle().Foreground(colOK)
+	styleWarn      = lipgloss.NewStyle().Foreground(colWarn).Bold(true)
 	styleError     = lipgloss.NewStyle().Foreground(colError).Bold(true)
 	styleDim       = lipgloss.NewStyle().Foreground(colMuted)
-	styleCursor    = lipgloss.NewStyle().Foreground(colAccent)
+	styleCursor    = lipgloss.NewStyle().Foreground(colPrimary)
 	styleStatus    = lipgloss.NewStyle().Foreground(colMuted)
-	styleStatusOn  = lipgloss.NewStyle().Foreground(colAccent)
-	styleComposer  = lipgloss.NewStyle().Padding(0, 1)
-	styleFooter    = lipgloss.NewStyle().Foreground(colMuted)
-	styleSuggest   = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#1A1B26"}).
-			Background(colAccent)
+	styleStatusOn  = lipgloss.NewStyle().Foreground(colPrimary)
+	styleComposer  = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colRule).
+			Padding(0, 1)
+	styleComposerBusy = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colPrimary).
+				Padding(0, 1)
+	styleFooter  = lipgloss.NewStyle().Foreground(colMuted)
+	styleSuggest = lipgloss.NewStyle().
+			Foreground(colText).
+			Background(colSel).
+			Bold(true)
 
-	styleDiffAdd     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#15803D", Dark: "#9ECE6A"})
-	styleDiffDel     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#F7768E"})
+	styleDiffAdd     = lipgloss.NewStyle().Foreground(colOK)
+	styleDiffDel     = lipgloss.NewStyle().Foreground(colError)
 	styleDiffHunk    = lipgloss.NewStyle().Foreground(colAccent)
 	styleDiffMeta    = lipgloss.NewStyle().Foreground(colMuted).Bold(true)
 	styleDiffContext = lipgloss.NewStyle().Foreground(colMuted)
 )
 
-// renderChat renders a turn with aligned labels and a hanging indent:
-//
-//	you    add a test for add()
-//	metis  I'll inspect the project first.
-//	       ...
-func renderChat(name string, label lipgloss.Style, text string, width int, streaming bool) string {
+// pill renders a compact label with a filled background, used for mode,
+// thinking, and model indicators in the status bar.
+func pill(label string, bg lipgloss.TerminalColor) string {
+	return lipgloss.NewStyle().
+		Foreground(colOnColor).
+		Background(bg).
+		Padding(0, 1).
+		Render(label)
+}
+
+// card renders content with a thick colored rule down its left edge. The
+// width argument is the total width including the rule; the content area is
+// width-2 after the left padding.
+func card(border lipgloss.TerminalColor, width int, content string) string {
+	if width < 8 {
+		return content
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder(), false, false, false, true).
+		BorderForeground(border).
+		PaddingLeft(1).
+		Width(max(1, width-1)).
+		Render(content)
+}
+
+// renderUser renders a user turn as a card with a secondary-colored edge.
+func renderUser(text string, width int) string {
 	text = clean(text)
-	const prefixW = 7
-	prefix := label.Render(fmt.Sprintf("%-5s", name)) + styleDim.Render("  ")
-	bodyW := width - prefixW
-	if bodyW < 12 {
-		bodyW = 12
-	}
-	if streaming {
-		bodyW-- // leave room for the cursor
-	}
 	if text == "" {
 		text = " "
 	}
-	body := ansi.Wrap(text, bodyW, "")
-	lines := strings.Split(body, "\n")
-	if streaming {
-		lines[len(lines)-1] += styleCursor.Render("▌")
-	}
-	indent := strings.Repeat(" ", prefixW)
-
-	var out strings.Builder
-	for i, line := range lines {
-		if i == 0 {
-			out.WriteString(prefix)
-		} else {
-			out.WriteString(indent)
-		}
-		out.WriteString(styleText.Render(line))
-		if i < len(lines)-1 {
-			out.WriteByte('\n')
-		}
-	}
-	return out.String()
+	body := ansi.Wrap(text, max(12, width-4), "")
+	content := styleUser.Render("you") + "\n" + styleText.Render(body)
+	return card(colSecondary, width, content)
 }
 
-// renderTool renders a tool call as a compact log entry:
+// renderTool renders a tool call as a compact card:
 //
-//	shell      $ go test ./...
-//	ok         exit code: 0  ·  1.2s
-//	           PASS
+//	┃ shell  $ go test ./...              ✓ ok  1.2s
+//	┃   PASS
 func renderTool(tool, args, result, duration string, running bool, width, maxLines int, highlight bool) string {
-	const (
-		indent  = 2
-		nameW   = 16
-		textCol = indent + nameW + 1
-		statusW = nameW
-	)
 	tool = clean(tool)
 	args = clean(args)
 	result = clean(result)
 
-	name := truncate(tool, nameW)
-	head := strings.Repeat(" ", indent) + styleTool.Render(fmt.Sprintf("%-*s", nameW, name))
-	if hint := formatToolArgs(tool, args); hint != "" {
-		hintW := max(10, width-textCol)
-		head += " " + styleDim.Render(truncate(hint, hintW))
-	}
-
+	inner := max(12, width-2)
 	failed := toolFailed(result)
-	status := "ok"
-	statusStyle := styleOK
-	if running {
-		status = "running"
-		statusStyle = styleStatusOn
-	} else if failed {
-		status = "failed"
-		statusStyle = styleError
-	}
-	statusCell := statusStyle.Render(fmt.Sprintf("%-*s", statusW, status))
 
-	lines := []string{head}
+	border := colRule
+	status := styleOK.Render("✓ ok")
+	switch {
+	case running:
+		border = colWarn
+		status = styleStatusOn.Render("◌ running")
+	case failed:
+		border = colError
+		status = styleError.Render("✗ failed")
+	}
+	if duration != "" && !running {
+		status += styleDim.Render("  " + duration)
+	}
+
+	left := styleTool.Render(truncate(tool, max(8, inner/3)))
+	if hint := formatToolArgs(tool, args); hint != "" {
+		hintW := max(10, inner-lipgloss.Width(left)-lipgloss.Width(status)-3)
+		left += "  " + styleDim.Render(truncate(hint, hintW))
+	}
+	lines := []string{joinLR(left, status, inner)}
+
 	if running && strings.TrimSpace(result) == "" {
-		lines = append(lines, strings.Repeat(" ", indent)+statusCell+" "+styleDim.Render("working…"))
-		return strings.Join(lines, "\n")
-	}
-	if strings.TrimSpace(result) == "" {
-		return strings.Join(lines, "\n")
-	}
+		lines = append(lines, styleDim.Render("working…"))
+	} else if strings.TrimSpace(result) != "" {
+		preview := previewLines(result, maxLines)
+		isDiff := looksLikeDiff(result)
+		textW := max(10, inner-2)
 
-	preview := previewLines(result, maxLines)
-	isDiff := looksLikeDiff(result)
-	textW := max(10, width-textCol)
-
-	var highlighted []string
-	highlightedOK := false
-	if highlight && !isDiff && !failed && !running && tool == "file_read" {
-		if p := pathArg(args); p != "" {
-			highlighted, highlightedOK = highlightPreview(preview, p)
-		}
-	}
-
-	for i, line := range preview {
-		if i == 0 && !failed {
-			line = strings.TrimPrefix(line, "ok: ")
-		}
-		var text string
-		switch {
-		case highlightedOK && i < len(highlighted):
-			text = ansi.Truncate(highlighted[i], textW, "…")
-		case isDiff:
-			text = renderDiffLine(line, textW)
-		default:
-			text = styleText.Render(truncate(line, textW))
-		}
-		if i == 0 {
-			row := strings.Repeat(" ", indent) + statusCell + " "
-			if failed {
-				row += styleError.Render(truncate(line, textW))
-			} else {
-				row += text
+		var highlighted []string
+		highlightedOK := false
+		if highlight && !isDiff && !failed && !running && tool == "file_read" {
+			if p := pathArg(args); p != "" {
+				highlighted, highlightedOK = highlightPreview(preview, p)
 			}
-			if duration != "" {
-				row += styleDim.Render("  ·  " + duration)
+		}
+
+		for i, line := range preview {
+			if i == 0 && !failed {
+				line = strings.TrimPrefix(line, "ok: ")
 			}
-			lines = append(lines, row)
-			continue
+			var text string
+			switch {
+			case highlightedOK && i < len(highlighted):
+				text = ansi.Truncate(highlighted[i], textW, "…")
+			case isDiff:
+				text = renderDiffLine(line, textW)
+			case failed:
+				text = styleError.Render(truncate(line, textW))
+			default:
+				text = styleDim.Render(truncate(line, textW))
+			}
+			lines = append(lines, "  "+text)
 		}
-		if highlightedOK && i < len(highlighted) {
-			lines = append(lines, strings.Repeat(" ", textCol)+text)
-			continue
-		}
-		if isDiff {
-			lines = append(lines, strings.Repeat(" ", textCol)+text)
-			continue
-		}
-		lines = append(lines, strings.Repeat(" ", textCol)+styleDim.Render(truncate(line, textW)))
 	}
-	return strings.Join(lines, "\n")
+	return card(border, width, strings.Join(lines, "\n"))
 }
 
 // pathArg extracts a file path from a tool-call argument object.
@@ -386,20 +369,44 @@ func formatToolArgs(tool, raw string) string {
 
 func renderError(text string, width int) string {
 	text = clean(text)
-	const prefixW = 7
-	prefix := styleError.Render(fmt.Sprintf("%-5s", "error")) + styleDim.Render("  ")
-	bodyW := max(12, width-prefixW)
-	body := ansi.Wrap(text, bodyW, "")
-	lines := strings.Split(body, "\n")
-	indent := strings.Repeat(" ", prefixW)
-	for i := range lines {
+	if strings.TrimSpace(text) == "" {
+		text = "unknown error"
+	}
+	body := ansi.Wrap(text, max(12, width-4), "")
+	content := styleError.Render("error") + "\n" + styleText.Render(body)
+	return card(colError, width, content)
+}
+
+func renderApproval(text string, width int) string {
+	text = clean(text)
+	inner := max(12, width-2)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
 		if i == 0 {
-			lines[i] = prefix + lines[i]
-		} else {
-			lines[i] = indent + lines[i]
+			lines[i] = styleWarn.Render(truncate(line, inner))
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			lines[i] = ""
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " ")
+		indent := line[:len(line)-len(trimmed)]
+		textW := max(6, inner-len(indent))
+		switch {
+		case strings.HasPrefix(trimmed, "y allow"):
+			lines[i] = styleDim.Render(truncate(line, inner))
+		case strings.HasPrefix(trimmed, "+"):
+			lines[i] = indent + styleDiffAdd.Render(truncate(trimmed, textW))
+		case strings.HasPrefix(trimmed, "-"):
+			lines[i] = indent + styleDiffDel.Render(truncate(trimmed, textW))
+		case strings.HasPrefix(trimmed, "@"):
+			lines[i] = indent + styleDiffHunk.Render(truncate(trimmed, textW))
+		default:
+			lines[i] = styleText.Render(truncate(line, inner))
 		}
 	}
-	return strings.Join(lines, "\n")
+	return card(colWarn, width, strings.Join(lines, "\n"))
 }
 
 func renderSystem(text string, width int) string {
@@ -412,50 +419,93 @@ func renderSystem(text string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderWelcome renders the compact startup panel.
-func renderWelcome(opts Options, width int) string {
-	inner := max(20, width-4)
-	ruleW := inner
-	if ruleW > 60 {
-		ruleW = 60
-	}
+// renderWelcome renders the startup screen: the wordmark, a tagline, and a
+// compact workspace summary. Short terminals get the mark and a hint only so
+// the logo never scrolls out of view.
+func renderWelcome(opts Options, width, height int) string {
+	inner := max(20, width-2)
+	logo := renderLogo(inner)
+	tagline := centerLines([]string{
+		styleDim.Render("metis · local-first coding agent"),
+	}, inner)
+	hint := styleDim.Render("Type a task and press Enter") +
+		styleDim.Render("  ·  / for commands  ·  tab switches mode")
 
-	var b strings.Builder
-	b.WriteString("  " + styleBrand.Render("workspace") + "\n")
-	b.WriteString("  " + styleRule.Render(strings.Repeat("─", ruleW)) + "\n")
+	if height < 10 {
+		return styleBrand.Render("METIS") + styleDim.Render(" · ") + styleLogoAgent.Render("AGENT") +
+			"\n" + tagline + "\n  " + truncate(hint, max(10, inner-2))
+	}
+	if height < 17 {
+		return logo + "\n" + tagline + "\n\n  " + truncate(hint, max(10, inner-2))
+	}
 
 	tools := "none"
 	switch {
 	case len(opts.Tools) > 6:
-		tools = fmt.Sprintf("%d tools · %s · …", len(opts.Tools), strings.Join(opts.Tools[:5], " · "))
+		tools = fmt.Sprintf("%d tools", len(opts.Tools))
 	case len(opts.Tools) > 0:
 		tools = strings.Join(opts.Tools, " · ")
-	}
-	rows := [][2]string{}
-	if opts.Provider != "" {
-		rows = append(rows, [2]string{"provider", opts.Provider})
 	}
 	approval := "ask"
 	if opts.AutoApprove {
 		approval = "auto"
 	}
-	rows = append(rows,
-		[2]string{"model", opts.Model},
-		[2]string{"server", strings.TrimPrefix(strings.TrimPrefix(opts.Server, "https://"), "http://")},
-		[2]string{"project", opts.Dir},
-		[2]string{"approval", approval},
-		[2]string{"tools", tools},
-	)
-	if opts.SessionID != "" {
-		rows = append(rows, [2]string{"session", opts.SessionID})
+	thinking := "none"
+	if opts.Thinking != "" {
+		thinking = opts.Thinking
 	}
-	valueW := max(10, inner-10)
-	for _, row := range rows {
-		b.WriteString("  " + styleDim.Render(fmt.Sprintf("%-8s", row[0])) + " " +
-			styleText.Render(truncate(row[1], valueW)) + "\n")
+	provider := opts.Provider
+	if provider == "" {
+		provider = "auto"
 	}
-	b.WriteString("\n  " + styleText.Render("Type a task and press Enter.") +
-		styleDim.Render("  /help for commands."))
+	server := strings.TrimPrefix(strings.TrimPrefix(opts.Server, "https://"), "http://")
+	session := opts.SessionID
+	if session == "" {
+		session = "ephemeral"
+	}
+
+	var b strings.Builder
+	b.WriteString(logo)
+	b.WriteString("\n")
+	b.WriteString(tagline)
+	b.WriteString("\n\n  ")
+	b.WriteString(styleBrand.Render("workspace"))
+	b.WriteString("\n  ")
+	ruleW := inner - 2
+	if ruleW > 60 {
+		ruleW = 60
+	}
+	b.WriteString(styleRule.Render(strings.Repeat("─", max(10, ruleW))))
+	b.WriteString("\n")
+
+	writeRow := func(left, right [2]string, colW int) {
+		cell := func(label, value string) string {
+			vw := max(6, colW-9)
+			text := styleDim.Render(fmt.Sprintf("%-8s", label)) + " " +
+				styleText.Render(truncate(value, vw))
+			return padRightANSI(text, colW)
+		}
+		b.WriteString("  " + cell(left[0], left[1]))
+		if right[0] != "" {
+			b.WriteString("  " + cell(right[0], right[1]))
+		}
+		b.WriteString("\n")
+	}
+
+	if width >= 68 {
+		colW := max(20, (inner-4)/2)
+		writeRow([2]string{"model", opts.Model}, [2]string{"approval", approval}, colW)
+		writeRow([2]string{"provider", provider}, [2]string{"thinking", thinking}, colW)
+		writeRow([2]string{"server", server}, [2]string{"tools", tools}, colW)
+		writeRow([2]string{"session", session}, [2]string{"project", projectLabel(opts.Dir)}, colW)
+	} else {
+		writeRow([2]string{"model", opts.Model}, [2]string{}, max(12, inner-2))
+		writeRow([2]string{"server", server}, [2]string{}, max(12, inner-2))
+		writeRow([2]string{"approval", approval}, [2]string{}, max(12, inner-2))
+	}
+
+	b.WriteString("\n  ")
+	b.WriteString(truncate(hint, max(10, inner-2)))
 	return b.String()
 }
 

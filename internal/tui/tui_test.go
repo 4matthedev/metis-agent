@@ -1,13 +1,17 @@
 package tui
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"metis-agent/internal/agent"
 	"metis-agent/internal/llm"
+	"metis-agent/internal/tools"
 )
 
 func testModel() *Model {
@@ -138,4 +142,65 @@ func TestTranscriptShowsEvents(t *testing.T) {
 			t.Errorf("transcript missing %q\n%s", want, content)
 		}
 	}
+}
+
+// blockingCompleter keeps a run in flight so the test can check that rendering
+// never waits on the agent's run-wide mutex.
+type blockingCompleter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingCompleter) Complete(ctx context.Context, _ []llm.Message, _ []llm.Tool, _ func(string)) (*llm.Completion, error) {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+		return &llm.Completion{Content: "done"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestViewDoesNotBlockDuringRun(t *testing.T) {
+	completer := &blockingCompleter{started: make(chan struct{}), release: make(chan struct{})}
+	a := agent.New(agent.Config{
+		LLM:      completer,
+		Registry: tools.NewRegistry(t.TempDir()),
+		MaxSteps: 1,
+		Window:   32768,
+	})
+	m := newModel(a, Options{Model: "test-model", Dir: "."})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = a.Run(ctx, "hello")
+	}()
+
+	select {
+	case <-completer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model call did not start")
+	}
+
+	// Agent.Run holds its mutex for the whole run. Rendering must not touch
+	// the agent in this state, or the UI loop deadlocks.
+	m.running = true
+	m.status = "thinking"
+	viewCh := make(chan string, 1)
+	go func() { viewCh <- m.View() }()
+	select {
+	case view := <-viewCh:
+		if !strings.Contains(view, "thinking") {
+			t.Errorf("view missing running status:\n%s", view)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("View blocked while a run was in flight")
+	}
+
+	close(completer.release)
+	<-done
 }
