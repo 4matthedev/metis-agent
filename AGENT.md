@@ -301,7 +301,7 @@ is identical across modes. Modes are: `ModeGeneral` (default), `ModePlanner`,
   the input is empty) and the `/mode [name]` command; the active mode is shown
   in the status bar and footer. TUI files are split by concern: `tui.go`
   (model/update), `commands.go` (slash commands), `sessions.go`, `approvals.go`,
-  `view.go`, plus the rendering helpers (`styles.go`, `markdown.go`, `diff.go`).
+  `view.go`, `logo.go` (Metis wordmark), plus the rendering helpers (`styles.go`, `markdown.go`, `diff.go`).
 
 ### Thinking level (reasoning effort)
 
@@ -844,7 +844,7 @@ that blocks legitimate workflows; do not remove the approval gate either.**
 | How do model fallbacks work? | `internal/llm/router.go` + `features.go` |
 | How does editor (ACP) mode work? | `internal/acp/acp.go` + `agent_build.go` |
 | How does semantic search work? | `internal/embeddings/embeddings.go` + `internal/tools/semantic.go` |
-| How are MCP tools wired? | `internal/mcp/mcp.go` + `internal/mcp/manager.go` + `main.go` |
+| How are MCP tools wired? | `internal/mcp/mcp.go` + `internal/mcp/manager.go` + `agent_build.go` + `main.go` |
 | How are skills discovered/used? | `internal/skills/skill.go` + `manager.go` + `main.go` |
 | What tools exist + their schemas? | `internal/tools/*.go` (`registry.go` order) |
 | How to build/test? | §12 (How to make a change, verification) |
