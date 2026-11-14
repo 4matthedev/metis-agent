@@ -1,7 +1,9 @@
-// Package config loads Metis settings from JSON files and the environment.
+// Package config loads Metis settings from .conf or JSON files and the
+// environment.
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -157,17 +159,22 @@ func cleanList(in []string) []string {
 	return out
 }
 
-// LoadFile reads and decodes a JSON config file.
+// LoadFile reads a .conf or JSON config file. The format is chosen by
+// extension; extensionless files are sniffed for a leading JSON object.
 func LoadFile(path string) (File, error) {
-	var f File
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return f, err
+		return File{}, err
 	}
-	if err := json.Unmarshal(b, &f); err != nil {
-		return f, fmt.Errorf("parse %s: %w", path, err)
+	b = bytes.TrimPrefix(b, []byte("\ufeff"))
+	if looksLikeJSON(path, b) {
+		var f File
+		if err := json.Unmarshal(b, &f); err != nil {
+			return f, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return f, nil
 	}
-	return f, nil
+	return parseConf(path, b)
 }
 
 // ConfigDir returns the platform config directory for Metis.
@@ -179,7 +186,17 @@ func ConfigDir() (string, error) {
 	return filepath.Join(base, "metis-agent"), nil
 }
 
-// GlobalPath returns the global config file path.
+// GlobalConfPath returns the preferred global .conf file path.
+func GlobalConfPath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.conf"), nil
+}
+
+// GlobalPath returns the legacy global JSON config path. It is still read for
+// backwards compatibility, after .conf files (which take precedence).
 func GlobalPath() (string, error) {
 	dir, err := ConfigDir()
 	if err != nil {
@@ -188,7 +205,16 @@ func GlobalPath() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
-// ProjectPath returns the per-project config path for dir.
+// ProjectConfPath returns the preferred per-project .conf path for dir.
+func ProjectConfPath(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, ".metis-agent.conf")
+}
+
+// ProjectPath returns the legacy per-project JSON path for dir. It remains the
+// path used by MCP persistence for backwards compatibility.
 func ProjectPath(dir string) string {
 	if strings.TrimSpace(dir) == "" {
 		dir = "."
@@ -371,37 +397,45 @@ func (v Values) Validate() error {
 	return nil
 }
 
-// WriteDefault writes a starter config file with 0600 permissions.
+// WriteDefault writes a starter config file with 0600 permissions. The format
+// follows the path extension: .conf/.cfg/.ini/.config write the commented
+// key=value format, everything else writes JSON.
 func WriteDefault(path string, v Values) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f := File{
-		Provider:         &v.Provider,
-		BaseURL:          &v.BaseURL,
-		Model:            &v.Model,
-		Temperature:      &v.Temperature,
-		MaxSteps:         &v.MaxSteps,
-		Window:           &v.Window,
-		Shell:            &v.Shell,
-		ShellTimeoutSec:  &v.ShellTimeoutSec,
-		Session:          &v.Session,
-		Highlight:        &v.Highlight,
-		AutoApprove:      &v.AutoApprove,
-		RedactSecrets:    &v.RedactSecrets,
-		Verify:           &v.Verify,
-		VerifyTimeoutSec: &v.VerifyTimeoutSec,
-		Instructions:     v.Instructions,
-		FallbackModels:   v.FallbackModels,
-		EmbeddingModel:   &v.EmbeddingModel,
-		Thinking:         &v.Thinking,
-		McpServers:       v.McpServers,
+	var b []byte
+	if isConfPath(path) {
+		b = renderDefaultConf(v)
+	} else {
+		f := File{
+			Provider:         &v.Provider,
+			BaseURL:          &v.BaseURL,
+			Model:            &v.Model,
+			Temperature:      &v.Temperature,
+			MaxSteps:         &v.MaxSteps,
+			Window:           &v.Window,
+			Shell:            &v.Shell,
+			ShellTimeoutSec:  &v.ShellTimeoutSec,
+			Session:          &v.Session,
+			Highlight:        &v.Highlight,
+			AutoApprove:      &v.AutoApprove,
+			RedactSecrets:    &v.RedactSecrets,
+			Verify:           &v.Verify,
+			VerifyTimeoutSec: &v.VerifyTimeoutSec,
+			Instructions:     v.Instructions,
+			FallbackModels:   v.FallbackModels,
+			EmbeddingModel:   &v.EmbeddingModel,
+			Thinking:         &v.Thinking,
+			McpServers:       v.McpServers,
+		}
+		var err error
+		b, err = json.MarshalIndent(f, "", "  ")
+		if err != nil {
+			return err
+		}
+		b = append(b, '\n')
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
 	return os.WriteFile(path, b, 0o600)
 }
 

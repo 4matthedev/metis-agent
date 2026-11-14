@@ -136,9 +136,12 @@ Run `scripts/install.sh --help` or `install.ps1 -Help` for details.
 | `~/Library/Application Support/metis-agent` | Application data on macOS |
 | `%LOCALAPPDATA%\metis-agent\bin` | Binary on Windows |
 | `~/.local/bin/metis-agent` | Launcher |
-| `~/.config/metis-agent/config.json` | Linux configuration |
-| `~/Library/Application Support/metis-agent/config.json` | macOS configuration |
-| `%APPDATA%\metis-agent\config.json` | Windows configuration |
+| `~/.config/metis-agent/config.conf` | Linux configuration (preferred) |
+| `~/.config/metis-agent/config.json` | Linux legacy JSON configuration |
+| `~/Library/Application Support/metis-agent/config.conf` | macOS configuration (preferred) |
+| `~/Library/Application Support/metis-agent/config.json` | macOS legacy JSON configuration |
+| `%APPDATA%\metis-agent\config.conf` | Windows configuration (preferred) |
+| `%APPDATA%\metis-agent\config.json` | Windows legacy JSON configuration |
 | `~/.local/share/metis-agent/backend.log` | Backend logs |
 
 On first run, the installer adds `~/.local/bin` to your shell rc file. Re-running the installer upgrades the binary and backs up an existing config first.
@@ -261,7 +264,9 @@ Type `/` to open the command menu. It filters as you type. Use `↑` / `↓` to 
 - `/mcp remove <name>` — disconnect and remove a server.
 - `/mcp reconnect <name>` — reconnect a server.
 
-Servers are persisted to `./.metis-agent.json` and reconnected on startup.
+Servers are persisted to `./.metis-agent.json` (legacy JSON) and reconnected on
+startup. You can also declare them in `[mcp.<name>]` sections of
+`.metis-agent.conf`; those take precedence over the JSON file.
 
 ### Skills commands
 
@@ -519,22 +524,46 @@ Not yet implemented: `session/load`, client `fs/*` and `terminal/*` methods, and
 
 ## ⚙ Configuration
 
-Settings can come from:
+Settings can come from, in increasing priority:
 
-1. Global configuration.
-2. Project configuration.
-3. Environment variables.
-4. Command-line flags.
+1. Global JSON config (legacy) — `~/.config/metis-agent/config.json`
+2. Global `.conf` — `~/.config/metis-agent/config.conf`
+3. Project JSON config (legacy) — `./.metis-agent.json`
+4. Project `.conf` — `./.metis-agent.conf`
+5. Environment variables
+6. Command-line flags
 
-Later sources override earlier ones.
+Later sources override earlier ones. Within each scope, `.conf` overrides the legacy JSON file.
 
-Run `--init-config` to write a starter file.
+Run `--init-config` to write a commented starter at
+`~/.config/metis-agent/config.conf` (or pass `--config PATH` to choose a
+different file). The format is deliberately simple:
+
+```conf
+# Global Metis configuration
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "gemma4:e4b"
+temperature = 0.3
+thinking = "medium"
+max_steps = 40
+window = 64
+auto_approve = false
+verify = "go test ./..."
+```
+
+Keys are case-insensitive and accept `-` or spaces instead of `_`, so
+`max-steps`, `max_steps`, and `MAX STEPS` are equivalent. Values may be quoted
+with `"` or `'`; comment lines start with `#`. Lists are comma-separated (or
+JSON arrays), and booleans accept `true`/`false`, `yes`/`no`, `on`/`off`, and
+`1`/`0`.
 
 Environment variables use the `METIS_` prefix. Examples:
 
 `METIS_PROVIDER` · `METIS_MODEL` · `METIS_AUTO_APPROVE` · `METIS_SHELL_TIMEOUT_SEC` · `METIS_REDACT_SECRETS` · `METIS_VERIFY` · `METIS_VERIFY_TIMEOUT_SEC` · `METIS_INSTRUCTIONS` · `METIS_FALLBACK_MODELS` · `METIS_THINKING` · `METIS_EMBEDDING_MODEL`
 
-See `internal/config/config.go` for the complete list.
+See `internal/config/conf.go` and `internal/config/config.go` for the complete
+list.
 
 ### Notable configuration fields
 
@@ -560,19 +589,42 @@ They are appended to the system prompt with their path as a heading.
 
 ### Project configuration
 
-The project config is `./.metis-agent.json`.
+The preferred project config is `./.metis-agent.conf`. The legacy
+`./.metis-agent.json` is still read, but `.conf` takes precedence when both
+exist.
 
-The global config is stored under `$XDG_CONFIG_HOME/metis-agent/config.json`, or the platform equivalent.
+The global config is stored under `$XDG_CONFIG_HOME/metis-agent/config.conf`,
+or the platform equivalent.
 
 Start with the example:
 
 ```bash
-cp .metis-agent.example.json .metis-agent.json
+cp .metis-agent.example.conf .metis-agent.conf
 ```
 
-Configuration can contain `api_key` and MCP `auth_token` values, so `.metis-agent.json` is git-ignored by default. Commit the example file, never real credentials.
+MCP servers use one section per server:
 
-MCP servers can be configured in `mcp_servers` or through `METIS_MCP_SERVERS`.
+```conf
+[mcp.github]
+type = "stdio"
+command = "npx"
+args = "-y", "@modelcontextprotocol/server-github"
+env.GITHUB_PERSONAL_ACCESS_TOKEN = "set-this-in-your-shell"
+
+[mcp.remote]
+type = "http"
+url = "https://mcp.example.com/mcp"
+auth_type = "bearer"
+auth_token = "set-this-in-your-shell"
+```
+
+The legacy JSON form (`mcp_servers`) and `METIS_MCP_SERVERS` are still
+supported. `/mcp add` continues to persist servers to `.metis-agent.json`;
+servers declared in `.metis-agent.conf` take precedence when both files exist.
+
+Configuration can contain `api_key` and MCP `auth_token` values, so
+`.metis-agent.conf` and `.metis-agent.json` are git-ignored by default. Commit
+the example file, never real credentials.
 
 ---
 
@@ -782,9 +834,9 @@ CI runs:
 | `--instructions L` | — | Comma-separated extra instruction files |
 | `--embedding-model M` | — | Enable `semantic_search` |
 | `--highlight` | `auto` | `auto`, `dark`, `light`, or `off` |
-| `--config` | — | Load a specific config file |
+| `--config` | — | Load a specific `.conf` or JSON config file |
 | `--no-config` | `false` | Ignore config files |
-| `--init-config` | `false` | Write a starter config file and exit |
+| `--init-config` | `false` | Write a starter `config.conf` and exit |
 | `--list-models` | `false` | List models from reachable providers |
 | `--session NAME` | — | Load or create a named session |
 | `--resume` | `false` | Resume the latest session for `--dir` |

@@ -51,26 +51,50 @@ func NewManager(registry *tools.Registry, configPath string) *Manager {
 // still kept in the list so the user can retry.
 func (m *Manager) Load(ctx context.Context) {
 	for _, cfg := range m.readServers() {
-		name := cfg.Name
-		if name == "" {
-			name = DefaultServerName(cfg)
-		}
-		cfg.Name = name
-		e := serverEntry{name: name, cfg: cfg}
-		client, err := Connect(ctx, cfg)
-		if err != nil {
-			// Keep it listed with no client (status will show not connected).
-			m.servers[name] = e
-			continue
-		}
-		specs, lerr := client.ListTools(ctx)
-		if lerr == nil {
-			e.client = client
-			e.tools = specs
-		}
-		m.servers[name] = e
+		m.addServer(ctx, cfg)
 	}
 	m.applyRegistry()
+}
+
+// LayerServers merges an additional set of servers (parsed from a .conf file)
+// on top of the servers already loaded from the legacy JSON config. For servers
+// whose names collide, the incoming set wins, which matches the documented
+// precedence (.conf beats .json within a scope). Replaced entries have their
+// old client closed.
+func (m *Manager) LayerServers(ctx context.Context, servers []ServerConfig) {
+	if len(servers) == 0 {
+		return
+	}
+	for _, cfg := range servers {
+		m.addServer(ctx, cfg)
+	}
+	m.applyRegistry()
+}
+
+// addServer registers a single server (connecting best-effort) and stores it
+// under its name. It overwrites any existing entry with the same name.
+func (m *Manager) addServer(ctx context.Context, cfg ServerConfig) {
+	name := cfg.Name
+	if name == "" {
+		name = DefaultServerName(cfg)
+	}
+	cfg.Name = name
+	if old, ok := m.servers[name]; ok && old.client != nil {
+		_ = old.client.Close()
+	}
+	e := serverEntry{name: name, cfg: cfg}
+	client, err := Connect(ctx, cfg)
+	if err != nil {
+		// Keep it listed with no client (status will show not connected).
+		m.servers[name] = e
+		return
+	}
+	specs, lerr := client.ListTools(ctx)
+	if lerr == nil {
+		e.client = client
+		e.tools = specs
+	}
+	m.servers[name] = e
 }
 
 // List returns a human-readable listing of all configured MCP servers.

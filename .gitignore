@@ -29,9 +29,11 @@ secrets.*
 *.token
 *.local.json
 
-# Project config (./.metis-agent.json) can hold api_key and MCP auth_token.
-# Only the committed example is versioned; force-add yours if it is secret-free:
-#   git add -f .metis-agent.json
+# Project config (./.metis-agent.conf or legacy .metis-agent.json) can hold
+# api_key and MCP auth_token. Only the committed example is versioned; force-add
+# yours if it is secret-free:
+#   git add -f .metis-agent.conf
+/.metis-agent.conf
 /.metis-agent.json
 
 # Sessions and logs

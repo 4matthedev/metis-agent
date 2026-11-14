@@ -60,9 +60,11 @@ metis-agent/
 │   ├── checkpoint/             # Per-turn file snapshots for /undo and --undo
 │   │   ├── checkpoint.go       # Manager: Begin/Snapshot/End/Undo, pruning
 │   │   └── checkpoint_test.go
-│   ├── config/                 # JSON config + env + platform paths
+│   ├── config/                 # .conf + JSON config, env, platform paths
 │   │   ├── config.go           # Values, File, Defaults(), ApplyEnv(), Validate()
-│   │   └── config_test.go
+│   │   ├── conf.go             # key=value parser, MCP sections, .conf writer
+│   │   ├── config_test.go
+│   │   └── conf_test.go
 │   ├── doctor/                 # Installation diagnostics for --doctor
 │   ├── embeddings/             # Cached semantic index + OpenAI-compatible client
 │   │   ├── embeddings.go       # index build/search, cache, chunking
@@ -180,20 +182,32 @@ the CLI and for every ACP session.
 ## 3. Configuration & flags (precedence)
 
 **Precedence, later wins:**
-1. Global config file (`~/.config/metis-agent/config.json` or platform equivalent)
-2. Project config file (`./.metis-agent.json`)
-3. Environment variables (`METIS_*`)
-4. CLI flags
+1. Global JSON config (`~/.config/metis-agent/config.json` or platform equivalent; legacy)
+2. Global `.conf` (`~/.config/metis-agent/config.conf`)
+3. Project JSON config (`./.metis-agent.json`; legacy)
+4. Project `.conf` (`./.metis-agent.conf`)
+5. Environment variables (`METIS_*`)
+6. CLI flags
+
+Within one scope, `.conf` overrides the legacy JSON file.
 
 | Source | Examples |
 |---|---|
-| Global config | `~/.config/metis-agent/config.json` |
-| Project config | `./.metis-agent.json` |
+| Global config | `~/.config/metis-agent/config.conf` (preferred), `config.json` (legacy) |
+| Project config | `./.metis-agent.conf` (preferred), `.metis-agent.json` (legacy) |
 | Env | `METIS_PROVIDER`, `METIS_MODEL`, `METIS_BASE_URL`, `METIS_API_KEY`, `METIS_TEMPERATURE`, `METIS_MAX_STEPS`, `METIS_WINDOW`, `METIS_SHELL_TIMEOUT_SEC`, `METIS_AUTO_APPROVE`, `METIS_REDACT_SECRETS`, `METIS_VERIFY`, `METIS_VERIFY_TIMEOUT_SEC`, `METIS_INSTRUCTIONS`, `METIS_FALLBACK_MODELS`, `METIS_EMBEDDING_MODEL`, `METIS_MCP_SERVERS` |
 | Flags | `--provider`, `--model`, `--base-url`, `--temp`, `--thinking`, `--max-steps`, `--window`, `--dir`, `--auto-approve`, `--approve-edits`, `--verify`, `--fallback-models`, `--embedding-model`, `--once`, `--json`, `--acp`, `--doctor`, `--update`, `--undo`, … |
 
 The config file shape (`internal/config/File`) uses **pointers** so an unset field
 doesn't override a zero value. `File.Apply(&v)` overlays only non-nil fields.
+`.conf` files are parsed by `parseConf` in `internal/config/conf.go`:
+case-insensitive keys, `key = value` or `key: value`, `#` comments, quoted
+values, comma-separated/JSON lists, and `[mcp.<name>]` sections with
+`env.KEY` / `headers.KEY` entries. Unknown keys and malformed values fail with
+`path:line`. `LoadFile` selects JSON vs `.conf` by extension and sniffs a
+leading `{` for extensionless paths. `WriteDefault` writes `.conf` for
+`.conf/.cfg/.ini/.config` paths and JSON otherwise; `--init-config` defaults to
+`config.conf`.
 `METIS_MCP_SERVERS` is a JSON array of `mcp.ServerConfig`, merged over file
 servers (same-name entries from env win).
 
@@ -525,9 +539,11 @@ rest of the tools) — never fatal.
 MCP servers can be added, removed, and reconnected **at runtime** via the
 `/mcp` slash command (both TUI and plain REPL), without restarting. `main.go`
 constructs an `mcp.Manager` (see `internal/mcp/manager.go`) around the registry
-and persists the configured servers to the project config file
+and persists the configured servers to the legacy project config file
 (`./.metis-agent.json`). On startup, `Manager.Load(ctx)` reads the config and
-reconnects each server; on exit, `Manager.CloseAll()` tears them down.
+reconnects each server; on exit, `Manager.CloseAll()` tears them down. Servers
+declared in `[mcp.<name>]` sections of `.metis-agent.conf` are layered on top
+of that JSON file (`.conf` wins on name conflicts).
 
 `/mcp` subcommands (parse the rest of the line as subcommand + args):
 - `/mcp` or `/mcp list` — list servers + their namespaced tools (`<server>__<tool>`).
@@ -728,7 +744,8 @@ messages. The reader loop dispatches each request in its own goroutine so
 - **History:** never shape messages in a way that breaks the well-formedness
   invariant (§5). Add test vectors if you change `Messages()`/`sanitizeMessages`.
 - **Config:** add new fields to `Values` + `File` (pointer) + `ApplyEnv` (a
-  `METIS_*` var) + flag in `main.go` + `Validate()` + `WriteDefault()`. Keep
+  `METIS_*` var) + flag in `main.go` + `Validate()` + `WriteDefault()` and
+  `applyConfValue`/`renderDefaultConf` in `internal/config/conf.go`. Keep
   precedence order.
 
 ### Adding a new built-in tool (checklist)
@@ -854,7 +871,8 @@ fish rc files. It keeps config/data/models by default; `--purge` removes them.
 `metis-agent_<version>_windows_amd64.tar.gz`, verifies `SHA256SUMS`, extracts
 with `tar.exe`, installs to `%LOCALAPPDATA%\metis-agent\bin`, updates the user
 `PATH`, and can install Ollama with `winget` and pull `gemma4:e2b`. Config goes
-to `%APPDATA%\metis-agent\config.json` and is written without a UTF-8 BOM.
+to `%APPDATA%\metis-agent\config.json` (legacy JSON) and is written without a UTF-8 BOM.
+Both `.conf` and JSON configs are read by the binary.
 `-Uninstall`/`-Purge` mirror the POSIX flow. `windows/arm64` is not published
 yet and the script says so instead of installing the wrong binary.
 
@@ -865,7 +883,8 @@ Layout POSIX creates:
 | `$XDG_DATA_HOME/metis-agent/bin/metis-agent` (default `~/.local/share/...`) | real binary (macOS: `~/Library/Application Support/metis-agent`) |
 | `$PREFIX/bin/metis-agent` (default `~/.local/bin/...`) | generated launcher; starts the backend on demand |
 | `$PREFIX/bin/Metis-Agent` | capitalized alias (case-sensitive filesystems) |
-| `$XDG_CONFIG_HOME/metis-agent/config.json` (macOS: `~/Library/Application Support/metis-agent/config.json`) | global config |
+| `$XDG_CONFIG_HOME/metis-agent/config.conf` (macOS: `~/Library/Application Support/metis-agent/config.conf`) | global config (preferred) |
+| `$XDG_CONFIG_HOME/metis-agent/config.json` (macOS: `.../config.json`) | legacy JSON config written by the installer |
 | `$XDG_DATA_HOME/metis-agent/backend.log` | backend stdout/stderr |
 
 The paths must match `internal/config`: Linux honours `XDG_CONFIG_HOME` and
@@ -890,7 +909,7 @@ assets, update both installers and `internal/update` in the same commit. When no
 release exists the POSIX installer falls back to `git clone` + `go build`.
 
 The generated launcher embeds the backend choice at install time, so changing
-`config.json` by hand does not change which process the launcher starts. The
+`config.conf` or `config.json` by hand does not change which process the launcher starts. The
 launcher runs the binary in the **current** directory (not `$HOME`); that is
 intentional for a coding agent. `--help`/`--version` bypass backend startup.
 

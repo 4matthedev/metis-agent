@@ -127,6 +127,17 @@ func buildAgent(dir string, resolved *llm.Resolved, v config.Values, systemPromp
 	mgr.Load(loadCtx)
 	loadCancel()
 
+	// [mcp.<name>] sections in the project's .metis-agent.conf layer on top of
+	// the legacy JSON servers; within this scope .conf wins on name conflicts
+	// (see AGENT.md §8).
+	if cfPath := config.ProjectConfPath(dir); cfPath != "" {
+		if cf, err := config.LoadFile(cfPath); err == nil && len(cf.McpServers) > 0 {
+			confCtx, confCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			mgr.LayerServers(confCtx, cf.McpServers)
+			confCancel()
+		}
+	}
+
 	// Skills: discover SKILL.md files from project-local and global dirs.
 	skillsM := skills.NewManager(dir)
 	registry.SetSkillsTool(tools.NewSkillsTool(skillsM, registry))

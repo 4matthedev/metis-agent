@@ -100,6 +100,61 @@ func TestManagerReloadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestManagerLayerServers verifies that .conf-parsed servers layer on top of
+// the legacy JSON servers, with the .conf side winning on name conflicts.
+func TestManagerLayerServers(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := workDir + "/.metis-agent.json"
+	cfg := tools.NewRegistryWithOptions(tools.Options{WorkDir: workDir})
+
+	// Seed the legacy JSON config with two servers, then load.
+	if err := os.WriteFile(cfgPath, []byte(`{
+  "mcp_servers": [
+    {"type": "stdio", "name": "legacy", "command": "/bin/legacy"},
+    {"type": "stdio", "name": "other", "command": "/bin/other"}
+  ]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(cfg, cfgPath)
+	m.Load(context.Background())
+	if len(m.servers) != 2 {
+		t.Fatalf("expected 2 JSON servers, got %d", len(m.servers))
+	}
+	if m.servers["legacy"].cfg.Command != "/bin/legacy" {
+		t.Fatalf("legacy command = %q", m.servers["legacy"].cfg.Command)
+	}
+
+	// Layer .conf servers: "legacy" conflicts (conf must win), "new" is added.
+	confServers := []ServerConfig{
+		{Name: "legacy", Type: "stdio", Command: "/bin/conf"},
+		{Type: "stdio", Name: "new", Command: "/bin/new"},
+	}
+	m.LayerServers(context.Background(), confServers)
+	if m.servers["legacy"].cfg.Command != "/bin/conf" {
+		t.Fatalf("conf did not win conflict: legacy command = %q", m.servers["legacy"].cfg.Command)
+	}
+	if _, ok := m.servers["other"]; !ok {
+		t.Fatal("expected 'other' from JSON to survive layering")
+	}
+	if m.servers["new"].cfg.Command != "/bin/new" {
+		t.Fatalf("new server not layered: command = %q", m.servers["new"].cfg.Command)
+	}
+	if len(m.servers) != 3 {
+		t.Fatalf("expected 3 servers after layering, got %d", len(m.servers))
+	}
+	if out := m.Command([]string{"list"}); !strings.Contains(out, "legacy") ||
+		!strings.Contains(out, "other") || !strings.Contains(out, "new") {
+		t.Fatalf("list should show layered servers: %q", out)
+	}
+
+	// Empty layering is a no-op.
+	m.LayerServers(context.Background(), nil)
+	if len(m.servers) != 3 {
+		t.Fatalf("empty LayerServers changed count: %d", len(m.servers))
+	}
+}
+
 func hasPrefix(s, p string) bool {
 	return len(s) >= len(p) && strings.HasPrefix(s, p)
 }

@@ -42,17 +42,30 @@ func Run(ctx context.Context, opts Options) []Check {
 
 	add("version", true, opts.Version)
 
-	if p, err := config.GlobalPath(); err == nil {
-		if _, err := os.Stat(p); err == nil {
-			add("global config", true, p)
+	globalConf, confErr := config.GlobalConfPath()
+	globalJSON, jsonErr := config.GlobalPath()
+	if confErr == nil {
+		if _, err := os.Stat(globalConf); err == nil {
+			add("global config", true, globalConf)
+		} else if jsonErr == nil {
+			if _, jsonStat := os.Stat(globalJSON); jsonStat == nil {
+				add("global config", true, globalJSON+" (legacy JSON)")
+			} else {
+				add("global config", false, globalConf+" (not found; defaults and flags still work)")
+			}
 		} else {
-			add("global config", false, p+" (not found; defaults and flags still work)")
+			add("global config", false, globalConf+" (not found; defaults and flags still work)")
 		}
 	} else {
-		add("global config", false, err.Error())
+		add("global config", false, confErr.Error())
 	}
-	if _, err := os.Stat(config.ProjectPath(opts.Dir)); err == nil {
-		add("project config", true, config.ProjectPath(opts.Dir))
+
+	projectConf := config.ProjectConfPath(opts.Dir)
+	projectJSON := config.ProjectPath(opts.Dir)
+	if _, err := os.Stat(projectConf); err == nil {
+		add("project config", true, projectConf)
+	} else if _, err := os.Stat(projectJSON); err == nil {
+		add("project config", true, projectJSON+" (legacy JSON)")
 	} else {
 		add("project config", true, "none (optional)")
 	}

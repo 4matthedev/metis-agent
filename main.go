@@ -146,9 +146,9 @@ const helpText = `usage: metis-agent [flags] [--once "task"]
   --instructions L    comma-separated extra instruction files
   --embedding-model M embedding model for semantic_search (for example nomic-embed-text)
   --highlight MODE    syntax highlighting: auto, dark, light, off
-  --config PATH       load this config file instead of the standard ones
+  --config PATH       load this config file (.conf or JSON) instead of the standard ones
   --no-config         ignore config files (environment and flags still apply)
-  --init-config       write a starter config file and exit
+  --init-config       write a starter config.conf and exit
   --list-models       list models from the configured/reachable providers
   --session NAME      load or create a named session
   --resume            resume the latest session for this directory
@@ -257,7 +257,7 @@ func main() {
 		path := *configPath
 		if path == "" {
 			var err error
-			path, err = config.GlobalPath()
+			path, err = config.GlobalConfPath()
 			if err != nil {
 				fatal(err)
 			}
@@ -271,28 +271,41 @@ func main() {
 
 	v := config.Defaults()
 	if !*noConfig {
-		paths := []string{}
+		apply := func(path string, explicit bool) {
+			f, err := config.LoadFile(path)
+			if err != nil {
+				if explicit {
+					fatal(err)
+				}
+				if errors.Is(err, os.ErrNotExist) {
+					return
+				}
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+				return
+			}
+			f.Apply(&v)
+		}
 		if *configPath != "" {
-			paths = append(paths, *configPath)
+			apply(*configPath, true)
 		} else {
+			// Layered so project settings beat global settings, and .conf
+			// settings beat legacy JSON within each scope.
+			var paths []string
 			if gp, err := config.GlobalPath(); err == nil {
 				paths = append(paths, gp)
 			}
-			paths = append(paths, config.ProjectPath(*dir))
-		}
-		for _, p := range paths {
-			f, err := config.LoadFile(p)
-			if err != nil {
-				if *configPath != "" {
-					fatal(fmt.Errorf("config %s: %w", p, err))
-				}
-				if errors.Is(err, os.ErrNotExist) {
+			if gp, err := config.GlobalConfPath(); err == nil {
+				paths = append(paths, gp)
+			}
+			paths = append(paths, config.ProjectPath(*dir), config.ProjectConfPath(*dir))
+			seen := map[string]bool{}
+			for _, p := range paths {
+				if p == "" || seen[p] {
 					continue
 				}
-				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-				continue
+				seen[p] = true
+				apply(p, false)
 			}
-			f.Apply(&v)
 		}
 	}
 	if err := config.ApplyEnv(&v); err != nil {
